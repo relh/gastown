@@ -24,13 +24,14 @@ import (
 
 // Daemon is the town-level background service.
 type Daemon struct {
-	config       *Config
-	tmux         *tmux.Tmux
-	logger       *log.Logger
-	ctx          context.Context
-	cancel       context.CancelFunc
-	backoff      *BackoffManager
+	config        *Config
+	tmux          *tmux.Tmux
+	logger        *log.Logger
+	ctx           context.Context
+	cancel        context.CancelFunc
+	backoff       *BackoffManager
 	notifications *NotificationManager
+	lastMOTDIndex int // tracks last MOTD to avoid consecutive repeats
 }
 
 // New creates a new daemon instance.
@@ -157,6 +158,39 @@ const DeaconRole = "deacon"
 
 // DeaconPatrolMolecule is the well-known ID for the deacon patrol molecule.
 const DeaconPatrolMolecule = "mol-deacon-patrol"
+
+// deaconMOTDMessages contains rotating motivational and educational tips
+// for the Deacon heartbeat. These make the thankless patrol role more fun.
+var deaconMOTDMessages = []string{
+	"Thanks for keeping the town running!",
+	"You are Gas Town's most critical role.",
+	"You are the heart of Gas Town! Be watchful!",
+	"Tip: Polecats are ephemeral - spawn freely, kill liberally.",
+	"Tip: Witnesses monitor polecats; you monitor witnesses.",
+	"Tip: Wisps are ephemeral molecules for patrol cycles.",
+	"The town sleeps soundly because you never do.",
+	"Tip: Mayor handles cross-rig coordination; you handle health.",
+	"Your vigilance keeps the agents honest.",
+	"Tip: Use 'gt deacon heartbeat' to signal you're alive.",
+	"Every heartbeat you check keeps Gas Town beating.",
+	"Tip: Stale agents need nudging; very stale ones need restarting.",
+}
+
+// nextMOTD returns the next MOTD message, rotating through the list
+// and avoiding consecutive repeats.
+func (d *Daemon) nextMOTD() string {
+	if len(deaconMOTDMessages) == 0 {
+		return "HEARTBEAT: run your rounds"
+	}
+
+	// Pick a random index that's different from the last one
+	nextIdx := d.lastMOTDIndex
+	for nextIdx == d.lastMOTDIndex && len(deaconMOTDMessages) > 1 {
+		nextIdx = int(time.Now().UnixNano() % int64(len(deaconMOTDMessages)))
+	}
+	d.lastMOTDIndex = nextIdx
+	return deaconMOTDMessages[nextIdx]
+}
 
 // ensureDeaconRunning checks if the Deacon session exists and starts it if not.
 // The Deacon is the system's heartbeat - it must always be running.
@@ -364,8 +398,9 @@ func (d *Daemon) pokeDeacon() {
 		return
 	}
 
-	// Send heartbeat message via tmux, replacing any pending input
-	msg := "HEARTBEAT: run your rounds"
+	// Send heartbeat message with rotating MOTD
+	motd := d.nextMOTD()
+	msg := fmt.Sprintf("HEARTBEAT: %s", motd)
 	if err := d.tmux.SendKeysReplace(DeaconSessionName, msg, 50); err != nil {
 		d.logger.Printf("Error poking Deacon: %v", err)
 		return
