@@ -268,17 +268,17 @@ func buildRestartCommand(sessionName string) (string, error) {
 		return "", err
 	}
 
-	// Determine GT_ROLE value for this session
+	// Determine GT_ROLE and BD_ACTOR values for this session
 	gtRole := sessionToGTRole(sessionName)
 
 	// For respawn-pane, we:
 	// 1. cd to the right directory (role's canonical home)
-	// 2. export GT_ROLE so role detection works correctly
+	// 2. export GT_ROLE and BD_ACTOR so role detection works correctly
 	// 3. run claude
 	// The SessionStart hook will run gt prime.
 	// Use exec to ensure clean process replacement.
 	if gtRole != "" {
-		return fmt.Sprintf("cd %s && export GT_ROLE=%s && exec claude --dangerously-skip-permissions", workDir, gtRole), nil
+		return fmt.Sprintf("cd %s && export GT_ROLE=%s BD_ACTOR=%s && exec claude --dangerously-skip-permissions", workDir, gtRole, gtRole), nil
 	}
 	return fmt.Sprintf("cd %s && exec claude --dangerously-skip-permissions", workDir), nil
 }

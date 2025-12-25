@@ -262,6 +262,9 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 
 	// Set environment
 	_ = d.tmux.SetEnvironment(sessionName, "GT_ROLE", identity)
+	// BD_ACTOR uses slashes instead of dashes for path-like identity
+	bdActor := identityToBDActor(identity)
+	_ = d.tmux.SetEnvironment(sessionName, "BD_ACTOR", bdActor)
 
 	// Apply theme
 	if identity == "mayor" {
@@ -425,5 +428,38 @@ func (d *Daemon) identityToStateFile(identity string) string {
 		}
 		// Unknown identity - can't determine state file
 		return ""
+	}
+}
+
+// identityToBDActor converts a daemon identity (with dashes) to BD_ACTOR format (with slashes).
+// Examples:
+//   - "mayor" → "mayor"
+//   - "gastown-witness" → "gastown/witness"
+//   - "gastown-refinery" → "gastown/refinery"
+//   - "gastown-crew-max" → "gastown/crew/max"
+func identityToBDActor(identity string) string {
+	switch identity {
+	case "mayor", "deacon":
+		return identity
+	default:
+		// Pattern: <rig>-witness → <rig>/witness
+		if strings.HasSuffix(identity, "-witness") {
+			rigName := strings.TrimSuffix(identity, "-witness")
+			return rigName + "/witness"
+		}
+		// Pattern: <rig>-refinery → <rig>/refinery
+		if strings.HasSuffix(identity, "-refinery") {
+			rigName := strings.TrimSuffix(identity, "-refinery")
+			return rigName + "/refinery"
+		}
+		// Pattern: <rig>-crew-<name> → <rig>/crew/<name>
+		if strings.Contains(identity, "-crew-") {
+			parts := strings.SplitN(identity, "-crew-", 2)
+			if len(parts) == 2 {
+				return parts[0] + "/crew/" + parts[1]
+			}
+		}
+		// Unknown format - return as-is
+		return identity
 	}
 }

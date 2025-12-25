@@ -202,6 +202,7 @@ func ensureSession(t *tmux.Tmux, sessionName, workDir, role string) error {
 
 	// Set environment
 	_ = t.SetEnvironment(sessionName, "GT_ROLE", role)
+	_ = t.SetEnvironment(sessionName, "BD_ACTOR", role)
 
 	// Apply theme based on role
 	switch role {
@@ -214,13 +215,13 @@ func ensureSession(t *tmux.Tmux, sessionName, workDir, role string) error {
 	}
 
 	// Launch Claude
-	// Export GT_ROLE in the command since tmux SetEnvironment only affects new panes
+	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
 	var claudeCmd string
 	if role == "deacon" {
 		// Deacon uses respawn loop
-		claudeCmd = `export GT_ROLE=deacon && while true; do echo "⛪ Starting Deacon session..."; claude --dangerously-skip-permissions; echo ""; echo "Deacon exited. Restarting in 2s... (Ctrl-C to stop)"; sleep 2; done`
+		claudeCmd = `export GT_ROLE=deacon BD_ACTOR=deacon && while true; do echo "⛪ Starting Deacon session..."; claude --dangerously-skip-permissions; echo ""; echo "Deacon exited. Restarting in 2s... (Ctrl-C to stop)"; sleep 2; done`
 	} else {
-		claudeCmd = fmt.Sprintf(`export GT_ROLE=%s && claude --dangerously-skip-permissions`, role)
+		claudeCmd = fmt.Sprintf(`export GT_ROLE=%s BD_ACTOR=%s && claude --dangerously-skip-permissions`, role, role)
 	}
 
 	if err := t.SendKeysDelayed(sessionName, claudeCmd, 200); err != nil {
@@ -246,16 +247,18 @@ func ensureWitness(t *tmux.Tmux, sessionName, rigPath, rigName string) error {
 	}
 
 	// Set environment
+	bdActor := fmt.Sprintf("%s/witness", rigName)
 	_ = t.SetEnvironment(sessionName, "GT_ROLE", "witness")
 	_ = t.SetEnvironment(sessionName, "GT_RIG", rigName)
+	_ = t.SetEnvironment(sessionName, "BD_ACTOR", bdActor)
 
 	// Apply theme (use rig-based theme)
 	theme := tmux.AssignTheme(rigName)
 	_ = t.ConfigureGasTownSession(sessionName, theme, "", "Witness", rigName)
 
 	// Launch Claude
-	// Export GT_ROLE in the command since tmux SetEnvironment only affects new panes
-	claudeCmd := `export GT_ROLE=witness && claude --dangerously-skip-permissions`
+	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
+	claudeCmd := fmt.Sprintf(`export GT_ROLE=witness BD_ACTOR=%s && claude --dangerously-skip-permissions`, bdActor)
 	if err := t.SendKeysDelayed(sessionName, claudeCmd, 200); err != nil {
 		return err
 	}

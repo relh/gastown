@@ -197,7 +197,7 @@ func (d *Daemon) ensureDeaconRunning() {
 
 		// Claude has exited (shell is showing) - restart it
 		d.logger.Printf("Deacon session exists but Claude exited (cmd=%s), restarting...", cmd)
-		if err := d.tmux.SendKeys(DeaconSessionName, "export GT_ROLE=deacon && claude --dangerously-skip-permissions"); err != nil {
+		if err := d.tmux.SendKeys(DeaconSessionName, "export GT_ROLE=deacon BD_ACTOR=deacon && claude --dangerously-skip-permissions"); err != nil {
 			d.logger.Printf("Error restarting Claude in Deacon session: %v", err)
 		}
 		return
@@ -215,11 +215,12 @@ func (d *Daemon) ensureDeaconRunning() {
 
 	// Set environment
 	_ = d.tmux.SetEnvironment(DeaconSessionName, "GT_ROLE", "deacon")
+	_ = d.tmux.SetEnvironment(DeaconSessionName, "BD_ACTOR", "deacon")
 
 	// Launch Claude directly (no shell respawn loop)
 	// The daemon will detect if Claude exits and restart it on next heartbeat
-	// Export GT_ROLE so Claude inherits it (tmux SetEnvironment doesn't export to processes)
-	if err := d.tmux.SendKeys(DeaconSessionName, "export GT_ROLE=deacon && claude --dangerously-skip-permissions"); err != nil {
+	// Export GT_ROLE and BD_ACTOR so Claude inherits them (tmux SetEnvironment doesn't export to processes)
+	if err := d.tmux.SendKeys(DeaconSessionName, "export GT_ROLE=deacon BD_ACTOR=deacon && claude --dangerously-skip-permissions"); err != nil {
 		d.logger.Printf("Error launching Claude in Deacon session: %v", err)
 		return
 	}

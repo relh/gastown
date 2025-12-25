@@ -321,8 +321,10 @@ func ensureWitnessSession(rigName string, r *rig.Rig) (bool, error) {
 	}
 
 	// Set environment
+	bdActor := fmt.Sprintf("%s/witness", rigName)
 	t.SetEnvironment(sessionName, "GT_ROLE", "witness")
 	t.SetEnvironment(sessionName, "GT_RIG", rigName)
+	t.SetEnvironment(sessionName, "BD_ACTOR", bdActor)
 
 	// Apply Gas Town theming
 	theme := tmux.AssignTheme(rigName)
@@ -331,8 +333,8 @@ func ensureWitnessSession(rigName string, r *rig.Rig) (bool, error) {
 	// Launch Claude directly (no shell respawn loop)
 	// Restarts are handled by daemon via LIFECYCLE mail or deacon health-scan
 	// NOTE: No gt prime injection needed - SessionStart hook handles it automatically
-	// Export GT_ROLE in the command since tmux SetEnvironment only affects new panes
-	if err := t.SendKeys(sessionName, "export GT_ROLE=witness && claude --dangerously-skip-permissions"); err != nil {
+	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
+	if err := t.SendKeys(sessionName, fmt.Sprintf("export GT_ROLE=witness BD_ACTOR=%s && claude --dangerously-skip-permissions", bdActor)); err != nil {
 		return false, fmt.Errorf("sending command: %w", err)
 	}
 

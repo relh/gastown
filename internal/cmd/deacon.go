@@ -202,6 +202,7 @@ func startDeaconSession(t *tmux.Tmux) error {
 
 	// Set environment
 	_ = t.SetEnvironment(DeaconSessionName, "GT_ROLE", "deacon")
+	_ = t.SetEnvironment(DeaconSessionName, "BD_ACTOR", "deacon")
 
 	// Apply Deacon theme
 	theme := tmux.DeaconTheme()
@@ -210,8 +211,8 @@ func startDeaconSession(t *tmux.Tmux) error {
 	// Launch Claude directly (no shell respawn loop)
 	// Restarts are handled by daemon via ensureDeaconRunning on each heartbeat
 	// The startup hook handles context loading automatically
-	// Export GT_ROLE in the command since tmux SetEnvironment only affects new panes
-	if err := t.SendKeys(DeaconSessionName, "export GT_ROLE=deacon && claude --dangerously-skip-permissions"); err != nil {
+	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
+	if err := t.SendKeys(DeaconSessionName, "export GT_ROLE=deacon BD_ACTOR=deacon && claude --dangerously-skip-permissions"); err != nil {
 		return fmt.Errorf("sending command: %w", err)
 	}
 

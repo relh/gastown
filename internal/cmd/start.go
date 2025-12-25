@@ -271,8 +271,10 @@ func ensureRefinerySession(rigName string, r *rig.Rig) (bool, error) {
 	}
 
 	// Set environment
+	bdActor := fmt.Sprintf("%s/refinery", rigName)
 	t.SetEnvironment(sessionName, "GT_ROLE", "refinery")
 	t.SetEnvironment(sessionName, "GT_RIG", rigName)
+	t.SetEnvironment(sessionName, "BD_ACTOR", bdActor)
 
 	// Set beads environment
 	beadsDir := filepath.Join(r.Path, "mayor", "rig", ".beads")
@@ -285,8 +287,8 @@ func ensureRefinerySession(rigName string, r *rig.Rig) (bool, error) {
 	_ = t.ConfigureGasTownSession(sessionName, theme, rigName, "refinery", "refinery")
 
 	// Launch Claude in a respawn loop
-	// Export GT_ROLE in the command since tmux SetEnvironment only affects new panes
-	loopCmd := `export GT_ROLE=refinery && while true; do echo "🛢️ Starting Refinery for ` + rigName + `..."; claude --dangerously-skip-permissions; echo ""; echo "Refinery exited. Restarting in 2s... (Ctrl-C to stop)"; sleep 2; done`
+	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
+	loopCmd := `export GT_ROLE=refinery BD_ACTOR=` + bdActor + ` && while true; do echo "🛢️ Starting Refinery for ` + rigName + `..."; claude --dangerously-skip-permissions; echo ""; echo "Refinery exited. Restarting in 2s... (Ctrl-C to stop)"; sleep 2; done`
 	if err := t.SendKeysDelayed(sessionName, loopCmd, 200); err != nil {
 		return false, fmt.Errorf("sending command: %w", err)
 	}

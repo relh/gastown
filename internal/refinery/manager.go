@@ -200,9 +200,11 @@ func (m *Manager) Start(foreground bool) error {
 	}
 
 	// Set environment variables
+	bdActor := fmt.Sprintf("%s/refinery", m.rig.Name)
 	_ = t.SetEnvironment(sessionID, "GT_RIG", m.rig.Name)
 	_ = t.SetEnvironment(sessionID, "GT_REFINERY", "1")
 	_ = t.SetEnvironment(sessionID, "GT_ROLE", "refinery")
+	_ = t.SetEnvironment(sessionID, "BD_ACTOR", bdActor)
 
 	// Set beads environment - refinery uses rig-level beads
 	beadsDir := filepath.Join(m.rig.Path, "mayor", "rig", ".beads")
