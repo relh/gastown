@@ -2,6 +2,29 @@
 // Centralizing these magic strings improves maintainability and consistency.
 package constants
 
+import "time"
+
+// Timing constants for session management and tmux operations.
+const (
+	// ShutdownNotifyDelay is the pause after sending shutdown notification.
+	ShutdownNotifyDelay = 500 * time.Millisecond
+
+	// ClaudeStartTimeout is how long to wait for Claude to start in a session.
+	ClaudeStartTimeout = 15 * time.Second
+
+	// ShellReadyTimeout is how long to wait for shell prompt after command.
+	ShellReadyTimeout = 5 * time.Second
+
+	// DefaultDebounceMs is the default debounce for SendKeys operations.
+	DefaultDebounceMs = 100
+
+	// DefaultDisplayMs is the default duration for tmux display-message.
+	DefaultDisplayMs = 5000
+
+	// PollInterval is the default polling interval for wait loops.
+	PollInterval = 100 * time.Millisecond
+)
+
 // Directory names within a Gas Town workspace.
 const (
 	// DirMayor is the directory containing mayor configuration and state.

@@ -155,7 +155,7 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 // Always sends Enter as a separate command for reliability.
 // Uses a debounce delay between paste and Enter to ensure paste completes.
 func (t *Tmux) SendKeys(session, keys string) error {
-	return t.SendKeysDebounced(session, keys, 100) // 100ms default debounce
+	return t.SendKeysDebounced(session, keys, constants.DefaultDebounceMs) // 100ms default debounce
 }
 
 // SendKeysDebounced sends keystrokes with a configurable delay before Enter.
@@ -375,7 +375,7 @@ func (t *Tmux) DisplayMessage(session, message string, durationMs int) error {
 
 // DisplayMessageDefault shows a message with default duration (5 seconds).
 func (t *Tmux) DisplayMessageDefault(session, message string) error {
-	return t.DisplayMessage(session, message, 5000)
+	return t.DisplayMessage(session, message, constants.DefaultDisplayMs)
 }
 
 // SendNotificationBanner sends a visible notification banner to a tmux session.
@@ -413,7 +413,7 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 	for time.Now().Before(deadline) {
 		cmd, err := t.GetPaneCommand(session)
 		if err != nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(constants.PollInterval)
 			continue
 		}
 		// Check if current command is NOT in the exclude list
@@ -427,7 +427,7 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 		if !excluded {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(constants.PollInterval)
 	}
 	return fmt.Errorf("timeout waiting for command (still running excluded command)")
 }
@@ -440,7 +440,7 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		cmd, err := t.GetPaneCommand(session)
 		if err != nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(constants.PollInterval)
 			continue
 		}
 		for _, shell := range shells {
@@ -448,7 +448,7 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 				return nil
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(constants.PollInterval)
 	}
 	return fmt.Errorf("timeout waiting for shell")
 }

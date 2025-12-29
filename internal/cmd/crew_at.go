@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -106,7 +105,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		_ = t.ConfigureGasTownSession(sessionID, theme, r.Name, name, "crew")
 
 		// Wait for shell to be ready after session creation
-		if err := t.WaitForShellReady(sessionID, 5*time.Second); err != nil {
+		if err := t.WaitForShellReady(sessionID, constants.ShellReadyTimeout); err != nil {
 			return fmt.Errorf("waiting for shell: %w", err)
 		}
 

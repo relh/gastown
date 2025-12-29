@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/keepalive"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -547,7 +548,7 @@ func StopDaemon(townRoot string) error {
 	}
 
 	// Wait a bit for graceful shutdown
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(constants.ShutdownNotifyDelay)
 
 	// Check if still running
 	if err := process.Signal(syscall.Signal(0)); err == nil {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -195,7 +196,7 @@ func (d *Daemon) executeLifecycleAction(request *LifecycleRequest) error {
 			d.logger.Printf("Killed session %s for restart", sessionName)
 
 			// Wait a moment
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(constants.ShutdownNotifyDelay)
 		}
 
 		// Restart the session

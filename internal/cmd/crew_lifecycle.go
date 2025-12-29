@@ -141,7 +141,7 @@ func runCrewRefresh(cmd *cobra.Command, args []string) error {
 	_ = t.SetEnvironment(sessionID, "GT_CREW", name)
 
 	// Wait for shell to be ready
-	if err := t.WaitForShellReady(sessionID, 5*time.Second); err != nil {
+	if err := t.WaitForShellReady(sessionID, constants.ShellReadyTimeout); err != nil {
 		return fmt.Errorf("waiting for shell: %w", err)
 	}
 
@@ -236,7 +236,7 @@ func runCrewRestart(cmd *cobra.Command, args []string) error {
 	_ = t.ConfigureGasTownSession(sessionID, theme, r.Name, name, "crew")
 
 	// Wait for shell to be ready
-	if err := t.WaitForShellReady(sessionID, 5*time.Second); err != nil {
+	if err := t.WaitForShellReady(sessionID, constants.ShellReadyTimeout); err != nil {
 		return fmt.Errorf("waiting for shell: %w", err)
 	}
 
@@ -250,11 +250,11 @@ func runCrewRestart(cmd *cobra.Command, args []string) error {
 
 	// Wait for Claude to start, then prime it
 	shells := constants.SupportedShells
-	if err := t.WaitForCommand(sessionID, shells, 15*time.Second); err != nil {
+	if err := t.WaitForCommand(sessionID, shells, constants.ClaudeStartTimeout); err != nil {
 		style.PrintWarning("Timeout waiting for Claude to start: %v", err)
 	}
 	// Give Claude time to initialize after process starts
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(constants.ShutdownNotifyDelay)
 	if err := t.SendKeys(sessionID, "gt prime"); err != nil {
 		// Non-fatal: Claude started but priming failed
 		style.PrintWarning("Could not send prime command: %v", err)
@@ -358,7 +358,7 @@ func runCrewRestartAll() error {
 		crewRig = savedRig
 
 		// Small delay between restarts to avoid overwhelming the system
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(constants.ShutdownNotifyDelay)
 	}
 
 	fmt.Println()
@@ -402,7 +402,7 @@ func restartCrewSession(rigName, crewName, clonePath string) error {
 	_ = t.ConfigureGasTownSession(sessionID, theme, rigName, crewName, "crew")
 
 	// Wait for shell to be ready
-	if err := t.WaitForShellReady(sessionID, 5*time.Second); err != nil {
+	if err := t.WaitForShellReady(sessionID, constants.ShellReadyTimeout); err != nil {
 		return fmt.Errorf("waiting for shell: %w", err)
 	}
 
@@ -415,10 +415,10 @@ func restartCrewSession(rigName, crewName, clonePath string) error {
 
 	// Wait for Claude to start, then prime it
 	shells := constants.SupportedShells
-	if err := t.WaitForCommand(sessionID, shells, 15*time.Second); err != nil {
+	if err := t.WaitForCommand(sessionID, shells, constants.ClaudeStartTimeout); err != nil {
 		// Non-fatal warning
 	}
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(constants.ShutdownNotifyDelay)
 	if err := t.SendKeys(sessionID, "gt prime"); err != nil {
 		// Non-fatal
 	}
