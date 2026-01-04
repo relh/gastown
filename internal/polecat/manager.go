@@ -259,13 +259,13 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (*Polecat, error)
 		fmt.Printf("Warning: could not create agent bead: %v\n", err)
 	}
 
-	// Return polecat with derived state (no issue assigned yet = idle)
+	// Return polecat with working state (transient model: polecats are spawned with work)
 	// State is derived from beads, not stored in state.json
 	now := time.Now()
 	polecat := &Polecat{
 		Name:      name,
 		Rig:       m.rig.Name,
-		State:     StateIdle, // No issue assigned yet
+		State:     StateWorking, // Transient model: polecat spawns with work
 		ClonePath: polecatPath,
 		Branch:    branchName,
 		CreatedAt: now,
@@ -478,12 +478,12 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		fmt.Printf("Warning: could not create agent bead: %v\n", err)
 	}
 
-	// Return fresh polecat
+	// Return fresh polecat in working state (transient model: polecats are spawned with work)
 	now := time.Now()
 	return &Polecat{
 		Name:      name,
 		Rig:       m.rig.Name,
-		State:     StateIdle,
+		State:     StateWorking,
 		ClonePath: polecatPath,
 		Branch:    branchName,
 		CreatedAt: now,
@@ -543,9 +543,8 @@ func (m *Manager) List() ([]*Polecat, error) {
 
 // Get returns a specific polecat by name.
 // State is derived from beads assignee field:
-// - If an issue is assigned to this polecat and is open/in_progress: StateWorking
-// - If an issue is assigned but closed: StateDone
-// - If no issue assigned: StateIdle
+// - If an issue is assigned to this polecat: StateWorking
+// - If no issue assigned: StateDone (ready for cleanup - transient polecats should have work)
 func (m *Manager) Get(name string) (*Polecat, error) {
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
@@ -557,7 +556,7 @@ func (m *Manager) Get(name string) (*Polecat, error) {
 // SetState updates a polecat's state.
 // In the beads model, state is derived from issue status:
 // - StateWorking/StateActive: issue status set to in_progress
-// - StateDone/StateIdle: assignee cleared from issue
+// - StateDone: assignee cleared from issue (polecat ready for cleanup)
 // - StateStuck: issue status set to blocked (if supported)
 // If beads is not available, this is a no-op.
 func (m *Manager) SetState(name string, state State) error {
@@ -582,8 +581,8 @@ func (m *Manager) SetState(name string, state State) error {
 				return fmt.Errorf("setting issue status: %w", err)
 			}
 		}
-	case StateDone, StateIdle:
-		// Clear assignment when done/idle
+	case StateDone:
+		// Clear assignment when done (polecat ready for cleanup)
 		if issue != nil {
 			empty := ""
 			if err := m.beads.Update(issue.ID, beads.UpdateOptions{Assignee: &empty}); err != nil {
@@ -654,7 +653,8 @@ func (m *Manager) ClearIssue(name string) error {
 }
 
 // loadFromBeads gets polecat info from beads assignee field.
-// State is simple: issue assigned → working, no issue → idle.
+// State is simple: issue assigned → working, no issue → done (ready for cleanup).
+// Transient polecats should always have work; no work means ready for Witness cleanup.
 // We don't interpret issue status (ZFC: Go is transport, not decision-maker).
 func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 	polecatPath := m.polecatDir(name)
@@ -671,20 +671,20 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 	assignee := m.assigneeID(name)
 	issue, beadsErr := m.beads.GetAssignedIssue(assignee)
 	if beadsErr != nil {
-		// If beads query fails, return basic polecat info
-		// This allows the system to work even if beads is not available
+		// If beads query fails, return basic polecat info as working
+		// (assume polecat is doing something if it exists)
 		return &Polecat{
 			Name:      name,
 			Rig:       m.rig.Name,
-			State:     StateIdle,
+			State:     StateWorking,
 			ClonePath: polecatPath,
 			Branch:    branchName,
 		}, nil
 	}
 
-	// Simple rule: has issue = working, no issue = idle
-	// We don't interpret issue.Status - that's for Claude to decide
-	state := StateIdle
+	// Transient model: has issue = working, no issue = done (ready for cleanup)
+	// Polecats without work should be nuked by the Witness
+	state := StateDone
 	issueID := ""
 	if issue != nil {
 		issueID = issue.ID
