@@ -40,6 +40,7 @@ Town root protection:
 Infrastructure checks:
   - stale-binary             Check if gt binary is up to date with repo
   - daemon                   Check if daemon is running (fixable)
+  - limits                   Check file descriptor/inotify limits (fixable)
   - repo-fingerprint         Check database has valid repo fingerprint (fixable)
   - boot-health              Check Boot watchdog health (vet mode)
 
@@ -122,6 +123,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewTownRootBranchCheck())
 	d.Register(doctor.NewPreCheckoutHookCheck())
 	d.Register(doctor.NewDaemonCheck())
+	d.Register(doctor.NewLimitsCheck())
 	d.Register(doctor.NewRepoFingerprintCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewBeadsDatabaseCheck())
