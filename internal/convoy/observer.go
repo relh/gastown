@@ -46,7 +46,7 @@ func CheckConvoysForIssue(townRoot, issueID, observer string, logger func(format
 		}
 
 		logger("%s: running convoy check for %s", observer, convoyID)
-		if err := runConvoyCheck(townRoot); err != nil {
+		if err := runConvoyCheck(townRoot, convoyID); err != nil {
 			logger("%s: convoy check failed: %v", observer, err)
 		}
 	}
@@ -120,10 +120,10 @@ func isConvoyClosed(townRoot, convoyID string) bool {
 	return results[0].Status == "closed"
 }
 
-// runConvoyCheck runs `gt convoy check` to close any completed convoys.
+// runConvoyCheck runs `gt convoy check <convoy-id>` to check a specific convoy.
 // This is idempotent and handles already-closed convoys gracefully.
-func runConvoyCheck(townRoot string) error {
-	cmd := exec.Command("gt", "convoy", "check")
+func runConvoyCheck(townRoot, convoyID string) error {
+	cmd := exec.Command("gt", "convoy", "check", convoyID)
 	cmd.Dir = townRoot
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
