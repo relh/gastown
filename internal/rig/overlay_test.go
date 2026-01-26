@@ -264,7 +264,8 @@ func TestEnsureGitignorePatterns_CreatesNewFile(t *testing.T) {
 	}
 
 	// Check all required patterns are present
-	patterns := []string{".runtime/", ".claude/", ".beads/", ".logs/"}
+	// Note: .beads/ is NOT added by Gas Town - beads handles its own .gitignore
+	patterns := []string{".runtime/", ".claude/", ".logs/"}
 	for _, pattern := range patterns {
 		if !containsLine(string(content), pattern) {
 			t.Errorf(".gitignore missing pattern %q", pattern)
@@ -302,7 +303,8 @@ func TestEnsureGitignorePatterns_AppendsToExisting(t *testing.T) {
 	}
 
 	// Should add required patterns
-	patterns := []string{".runtime/", ".claude/", ".beads/", ".logs/"}
+	// Note: .beads/ is NOT added by Gas Town - beads handles its own .gitignore
+	patterns := []string{".runtime/", ".claude/", ".logs/"}
 	for _, pattern := range patterns {
 		if !containsLine(string(content), pattern) {
 			t.Errorf(".gitignore missing pattern %q", pattern)
@@ -336,9 +338,7 @@ func TestEnsureGitignorePatterns_SkipsExistingPatterns(t *testing.T) {
 	}
 
 	// Should add missing patterns
-	if !containsLine(string(content), ".beads/") {
-		t.Error(".gitignore missing pattern .beads/")
-	}
+	// Note: .beads/ is NOT added by Gas Town - beads handles its own .gitignore
 	if !containsLine(string(content), ".logs/") {
 		t.Error(".gitignore missing pattern .logs/")
 	}
