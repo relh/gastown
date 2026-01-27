@@ -30,6 +30,9 @@ var (
 
 	// SWARM_START - mayor initiating batch work
 	PatternSwarmStart = regexp.MustCompile(`^SWARM_START`)
+
+	// WORK_REQUEUE <bead-id> - circuit breaker triggered work reassignment
+	PatternWorkRequeue = regexp.MustCompile(`^WORK_REQUEUE\s+(\S+)`)
 )
 
 // ProtocolType identifies the type of protocol message.
@@ -43,6 +46,7 @@ const (
 	ProtoMergeFailed       ProtocolType = "merge_failed"
 	ProtoHandoff           ProtocolType = "handoff"
 	ProtoSwarmStart        ProtocolType = "swarm_start"
+	ProtoWorkRequeue       ProtocolType = "work_requeue"
 	ProtoUnknown           ProtocolType = "unknown"
 )
 
@@ -92,6 +96,16 @@ type SwarmStartPayload struct {
 	StartedAt time.Time
 }
 
+// WorkRequeuePayload contains parsed data from a WORK_REQUEUE message.
+// This is sent when a circuit breaker trips and work needs reassignment.
+type WorkRequeuePayload struct {
+	BeadID          string // The work bead that needs reassignment
+	PreviousPolecat string // The polecat that failed
+	FailureCount    int    // Number of consecutive failures
+	Reason          string // Why the work is being requeued
+	RequestedAt     time.Time
+}
+
 // ClassifyMessage determines the protocol type from a message subject.
 func ClassifyMessage(subject string) ProtocolType {
 	switch {
@@ -109,6 +123,8 @@ func ClassifyMessage(subject string) ProtocolType {
 		return ProtoHandoff
 	case PatternSwarmStart.MatchString(subject):
 		return ProtoSwarmStart
+	case PatternWorkRequeue.MatchString(subject):
+		return ProtoWorkRequeue
 	default:
 		return ProtoUnknown
 	}
@@ -275,6 +291,41 @@ func ParseSwarmStart(body string) (*SwarmStartPayload, error) {
 			payload.SwarmID = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "SwarmID:"), "swarm_id:"))
 		} else if strings.HasPrefix(line, "Total:") {
 			_, _ = fmt.Sscanf(line, "Total: %d", &payload.Total)
+		}
+	}
+
+	return payload, nil
+}
+
+// ParseWorkRequeue extracts payload from a WORK_REQUEUE message.
+// Subject format: WORK_REQUEUE <bead-id>
+// Body format:
+//
+//	Bead: <bead-id>
+//	Previous Polecat: <rig>/<name>
+//	Failure Count: <count>
+//	Reason: <reason>
+func ParseWorkRequeue(subject, body string) (*WorkRequeuePayload, error) {
+	matches := PatternWorkRequeue.FindStringSubmatch(subject)
+	if len(matches) < 2 {
+		return nil, fmt.Errorf("invalid WORK_REQUEUE subject: %s", subject)
+	}
+
+	payload := &WorkRequeuePayload{
+		BeadID:      matches[1],
+		RequestedAt: time.Now(),
+	}
+
+	// Parse body for structured fields
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Previous Polecat:"):
+			payload.PreviousPolecat = strings.TrimSpace(strings.TrimPrefix(line, "Previous Polecat:"))
+		case strings.HasPrefix(line, "Failure Count:"):
+			_, _ = fmt.Sscanf(line, "Failure Count: %d", &payload.FailureCount)
+		case strings.HasPrefix(line, "Reason:"):
+			payload.Reason = strings.TrimSpace(strings.TrimPrefix(line, "Reason:"))
 		}
 	}
 

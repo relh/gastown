@@ -60,6 +60,27 @@ func HandlePolecatDone(workDir, rigName string, msg *mail.Message) *HandlerResul
 		return result
 	}
 
+	// Circuit breaker: track failures for ESCALATED/DEFERRED, reset on COMPLETED
+	// This enables automatic isolation of consistently failing polecats.
+	switch payload.Exit {
+	case "ESCALATED", "DEFERRED":
+		// Increment failure count - may trip circuit breaker
+		config := DefaultCircuitBreakerConfig()
+		newCount, tripped, err := HandlePolecatFailure(workDir, rigName, payload.PolecatName, config.MaxFailures)
+		if err != nil {
+			// Non-fatal: log but continue with normal handling
+			// Circuit breaker is an enhancement, not a blocker
+		} else if tripped {
+			// Circuit tripped - this will be handled by CheckCircuitBreakers in patrol
+			result.Action = fmt.Sprintf("circuit breaker tripped for %s (failures=%d)", payload.PolecatName, newCount)
+		}
+	case "COMPLETED":
+		// Reset failure count on success
+		if err := HandlePolecatSuccess(workDir, rigName, payload.PolecatName); err != nil {
+			// Non-fatal: log but continue
+		}
+	}
+
 	// Handle PHASE_COMPLETE: recycle polecat (session ends but worktree stays)
 	// The polecat is registered as a waiter on the gate and will be re-dispatched
 	// when the gate closes via gt gate wake.
