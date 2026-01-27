@@ -41,6 +41,9 @@ type AgentFields struct {
 	CleanupStatus     string // ZFC: polecat self-reports git state (clean, has_uncommitted, has_stash, has_unpushed)
 	ActiveMR          string // Currently active merge request bead ID (for traceability)
 	NotificationLevel string // DND mode: verbose, normal, muted (default: normal)
+	// Circuit breaker fields for failure isolation
+	FailureCount int    // Consecutive failure count (reset on success)
+	CircuitState string // Circuit breaker state: closed, open, half_open (default: closed)
 	// Note: RoleBead field removed - role definitions are now config-based.
 	// See internal/config/roles/*.toml and config-based-roles.md.
 }
@@ -50,6 +53,13 @@ const (
 	NotifyVerbose = "verbose" // All notifications (mail, convoy events, etc.)
 	NotifyNormal  = "normal"  // Important events only (default)
 	NotifyMuted   = "muted"   // Silent/DND mode - batch for later
+)
+
+// Circuit breaker state constants
+const (
+	CircuitClosed   = "closed"    // Normal operation, accepting work
+	CircuitOpen     = "open"      // Tripped, rejecting work, needs cooldown
+	CircuitHalfOpen = "half_open" // Testing if recovered, allowing single retry
 )
 
 // FormatAgentDescription creates a description string from agent fields.
@@ -97,6 +107,15 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 		lines = append(lines, "notification_level: null")
 	}
 
+	// Circuit breaker fields
+	lines = append(lines, fmt.Sprintf("failure_count: %d", fields.FailureCount))
+
+	if fields.CircuitState != "" {
+		lines = append(lines, fmt.Sprintf("circuit_state: %s", fields.CircuitState))
+	} else {
+		lines = append(lines, "circuit_state: closed")
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -138,6 +157,13 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.ActiveMR = value
 		case "notification_level":
 			fields.NotificationLevel = value
+		case "failure_count":
+			var count int
+			if _, err := fmt.Sscanf(value, "%d", &count); err == nil {
+				fields.FailureCount = count
+			}
+		case "circuit_state":
+			fields.CircuitState = value
 		}
 	}
 
@@ -433,6 +459,118 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 		return NotifyNormal, nil
 	}
 	return fields.NotificationLevel, nil
+}
+
+// UpdateAgentFailureCount updates the failure_count field in an agent bead.
+// Used for circuit breaker pattern - tracks consecutive failures.
+func (b *Beads) UpdateAgentFailureCount(id string, failureCount int) error {
+	// First get current issue to preserve other fields
+	issue, err := b.Show(id)
+	if err != nil {
+		return err
+	}
+
+	// Parse existing fields
+	fields := ParseAgentFields(issue.Description)
+	fields.FailureCount = failureCount
+
+	// Format new description
+	description := FormatAgentDescription(issue.Title, fields)
+
+	return b.Update(id, UpdateOptions{Description: &description})
+}
+
+// UpdateAgentCircuitState updates the circuit_state field in an agent bead.
+// Valid states: closed (normal), open (tripped), half_open (testing recovery).
+func (b *Beads) UpdateAgentCircuitState(id string, circuitState string) error {
+	// Validate state
+	if circuitState != "" && circuitState != CircuitClosed && circuitState != CircuitOpen && circuitState != CircuitHalfOpen {
+		return fmt.Errorf("invalid circuit state %q: must be closed, open, or half_open", circuitState)
+	}
+
+	// First get current issue to preserve other fields
+	issue, err := b.Show(id)
+	if err != nil {
+		return err
+	}
+
+	// Parse existing fields
+	fields := ParseAgentFields(issue.Description)
+	fields.CircuitState = circuitState
+
+	// Format new description
+	description := FormatAgentDescription(issue.Title, fields)
+
+	return b.Update(id, UpdateOptions{Description: &description})
+}
+
+// IncrementAgentFailureCount atomically increments failure count and optionally trips the circuit.
+// Returns the new failure count and whether the circuit was tripped.
+func (b *Beads) IncrementAgentFailureCount(id string, maxFailures int) (int, bool, error) {
+	// First get current issue to preserve other fields
+	issue, err := b.Show(id)
+	if err != nil {
+		return 0, false, err
+	}
+
+	// Parse existing fields
+	fields := ParseAgentFields(issue.Description)
+	fields.FailureCount++
+	newCount := fields.FailureCount
+
+	// Check if we should trip the circuit
+	tripped := false
+	if fields.FailureCount >= maxFailures && fields.CircuitState != CircuitOpen {
+		fields.CircuitState = CircuitOpen
+		tripped = true
+	}
+
+	// Format new description
+	description := FormatAgentDescription(issue.Title, fields)
+
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return 0, false, err
+	}
+
+	return newCount, tripped, nil
+}
+
+// ResetAgentFailureCount resets the failure count to zero and closes the circuit.
+// Called when an agent successfully completes work.
+func (b *Beads) ResetAgentFailureCount(id string) error {
+	// First get current issue to preserve other fields
+	issue, err := b.Show(id)
+	if err != nil {
+		return err
+	}
+
+	// Parse existing fields
+	fields := ParseAgentFields(issue.Description)
+	fields.FailureCount = 0
+	fields.CircuitState = CircuitClosed
+
+	// Format new description
+	description := FormatAgentDescription(issue.Title, fields)
+
+	return b.Update(id, UpdateOptions{Description: &description})
+}
+
+// GetAgentCircuitState returns the circuit breaker state and failure count for an agent.
+// Returns closed, 0 if not set (the defaults).
+func (b *Beads) GetAgentCircuitState(id string) (string, int, error) {
+	_, fields, err := b.GetAgentBead(id)
+	if err != nil {
+		return "", 0, err
+	}
+	if fields == nil {
+		return CircuitClosed, 0, nil
+	}
+
+	state := fields.CircuitState
+	if state == "" {
+		state = CircuitClosed
+	}
+	return state, fields.FailureCount, nil
 }
 
 // DeleteAgentBead permanently deletes an agent bead.
