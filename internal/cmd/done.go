@@ -805,7 +805,7 @@ func parseCleanupStatus(s string) polecat.CleanupStatus {
 // selfNukePolecat deletes this polecat's worktree (self-cleaning model).
 // Called by polecats when they complete work via `gt done`.
 // This is safe because:
-// 1. Work has been pushed to origin (MR is in queue)
+// 1. Work has been pushed to origin (verified below)
 // 2. We're about to exit anyway
 // 3. Unix allows deleting directories while processes run in them
 func selfNukePolecat(roleInfo RoleInfo, _ string) error {
@@ -819,8 +819,32 @@ func selfNukePolecat(roleInfo RoleInfo, _ string) error {
 		return fmt.Errorf("getting polecat manager: %w", err)
 	}
 
-	// Use nuclear=true since we know we just pushed our work
-	// The branch is pushed, MR is created, we're clean
+	// Verify branch actually exists on a remote before nuking local copy.
+	// If push didn't land (no remote, auth failure, etc.), preserve worktree
+	// so Witness/Refinery can still access the branch.
+	clonePath := mgr.ClonePath(roleInfo.Polecat)
+	polecatGit := git.NewGit(clonePath)
+	remotes, err := polecatGit.Remotes()
+	if err != nil || len(remotes) == 0 {
+		return fmt.Errorf("no git remotes configured — preserving worktree to prevent data loss")
+	}
+	branchName, err := polecatGit.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("cannot determine current branch — preserving worktree: %w", err)
+	}
+	pushed := false
+	for _, remote := range remotes {
+		exists, err := polecatGit.RemoteBranchExists(remote, branchName)
+		if err == nil && exists {
+			pushed = true
+			break
+		}
+	}
+	if !pushed {
+		return fmt.Errorf("branch %s not found on any remote — preserving worktree", branchName)
+	}
+
+	// Use nuclear=true since we verified the branch is pushed
 	// selfNuke=true because polecat is deleting its own worktree from inside it
 	if err := mgr.RemoveWithOptions(roleInfo.Polecat, true, true, true); err != nil {
 		return fmt.Errorf("removing worktree: %w", err)
