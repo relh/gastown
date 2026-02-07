@@ -401,6 +401,28 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 		rc = &RuntimeConfig{}
 	}
 
+	// Shallow copy to avoid mutating the input
+	copy := *rc
+	rc = &copy
+
+	// Deep copy nested structs to avoid shared references
+	if rc.Session != nil {
+		s := *rc.Session
+		rc.Session = &s
+	}
+	if rc.Hooks != nil {
+		h := *rc.Hooks
+		rc.Hooks = &h
+	}
+	if rc.Tmux != nil {
+		t := *rc.Tmux
+		rc.Tmux = &t
+	}
+	if rc.Instructions != nil {
+		i := *rc.Instructions
+		rc.Instructions = &i
+	}
+
 	if rc.Provider == "" {
 		rc.Provider = "claude"
 	}
