@@ -24,7 +24,6 @@ NC='\033[0m'
 
 log()     { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
-fail()    { echo -e "${RED}[X]${NC} $1"; }
 section() { echo -e "\n${BLUE}${BOLD}=== $1 ===${NC}\n"; }
 pass()    { echo -e "  ${GREEN}[PASS]${NC} $1"; PASSES=$((PASSES + 1)); }
 fail_check() { echo -e "  ${RED}[FAIL]${NC} $1"; FAILURES=$((FAILURES + 1)); FAIL_DETAILS+=("$1"); }
@@ -258,10 +257,10 @@ verify_zero_artifacts() {
     local sqlite_artifacts=$(sudo find "$TOWN_ROOT" -maxdepth 3 -name "beads.db" -not -path "*backup*" 2>/dev/null | wc -l)
     local wal_artifacts=$(sudo find "$TOWN_ROOT" -maxdepth 3 -name "beads.db-wal" 2>/dev/null | wc -l)
     local shm_artifacts=$(sudo find "$TOWN_ROOT" -maxdepth 3 -name "beads.db-shm" 2>/dev/null | wc -l)
-    if [[ "$wal_artifacts" -gt 0 || "$shm_artifacts" -gt 0 ]]; then
-        fail_check "$test_name: SQLite WAL/SHM artifacts remain (wal=$wal_artifacts, shm=$shm_artifacts)"
+    if [[ "$sqlite_artifacts" -gt 0 || "$wal_artifacts" -gt 0 || "$shm_artifacts" -gt 0 ]]; then
+        fail_check "$test_name: SQLite artifacts remain (db=$sqlite_artifacts, wal=$wal_artifacts, shm=$shm_artifacts)"
     else
-        pass "$test_name: no SQLite WAL/SHM artifacts"
+        pass "$test_name: no SQLite artifacts"
     fi
 
     # Check 3: No issues.jsonl (should be removed or renamed after migration)
