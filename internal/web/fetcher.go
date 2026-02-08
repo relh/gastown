@@ -200,6 +200,19 @@ type trackedIssueInfo struct {
 	UpdatedAt    time.Time // Fallback for activity when no assignee
 }
 
+// extractIssueID strips the external:prefix:id wrapper from bead IDs.
+// formatTrackBeadID() wraps cross-rig IDs as "external:prefix:id" for routing,
+// but consumers need the raw bead ID for bd show lookups.
+func extractIssueID(id string) string {
+	if strings.HasPrefix(id, "external:") {
+		parts := strings.SplitN(id, ":", 3)
+		if len(parts) == 3 {
+			return parts[2]
+		}
+	}
+	return id
+}
+
 // getTrackedIssues fetches tracked issues for a convoy.
 func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) []trackedIssueInfo {
 	// Query tracked dependencies using bd dep list
@@ -215,10 +228,10 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) []trackedIssueInfo
 		return nil
 	}
 
-	// Collect resolved issue IDs
+	// Collect resolved issue IDs, unwrapping external:prefix:id format
 	issueIDs := make([]string, 0, len(deps))
 	for _, dep := range deps {
-		issueIDs = append(issueIDs, dep.ID)
+		issueIDs = append(issueIDs, extractIssueID(dep.ID))
 	}
 
 	// Batch fetch issue details

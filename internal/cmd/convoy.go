@@ -1321,6 +1321,19 @@ type trackedIssueInfo struct {
 	WorkerAge string `json:"worker_age,omitempty"` // How long worker has been on this issue
 }
 
+// extractIssueID strips the external:prefix:id wrapper from bead IDs.
+// formatTrackBeadID() wraps cross-rig IDs as "external:prefix:id" for routing,
+// but consumers need the raw bead ID for bd show lookups.
+func extractIssueID(id string) string {
+	if strings.HasPrefix(id, "external:") {
+		parts := strings.SplitN(id, ":", 3)
+		if len(parts) == 3 {
+			return parts[2]
+		}
+	}
+	return id
+}
+
 // getTrackedIssues uses bd dep list to get issues tracked by a convoy.
 // Returns issue details including status, type, and worker info.
 func getTrackedIssues(townBeads, convoyID string) []trackedIssueInfo {
@@ -1348,6 +1361,11 @@ func getTrackedIssues(townBeads, convoyID string) []trackedIssueInfo {
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
 		return nil
+	}
+
+	// Unwrap external:prefix:id format from dep IDs before use
+	for i := range deps {
+		deps[i].ID = extractIssueID(deps[i].ID)
 	}
 
 	// Collect non-closed issue IDs for worker lookup

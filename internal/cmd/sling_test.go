@@ -218,6 +218,29 @@ func TestFormatTrackBeadIDConsumerCompatibility(t *testing.T) {
 	}
 }
 
+func TestExtractIssueID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{"unwraps external format", "external:gt-mol:gt-mol-abc123", "gt-mol-abc123"},
+		{"unwraps beads external", "external:beads-task:beads-task-xyz", "beads-task-xyz"},
+		{"passes through hq IDs", "hq-abc123", "hq-abc123"},
+		{"passes through plain IDs", "gt-abc123", "gt-abc123"},
+		{"handles malformed external (only 2 parts)", "external:gt-mol", "external:gt-mol"},
+		{"handles empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractIssueID(tt.id)
+			if got != tt.want {
+				t.Errorf("extractIssueID(%q) = %q, want %q", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSlingFormulaOnBeadRoutesBDCommandsToTargetRig(t *testing.T) {
 	townRoot := t.TempDir()
 
