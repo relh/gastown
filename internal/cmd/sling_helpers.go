@@ -78,7 +78,7 @@ type beadInfo struct {
 // Checks bead existence using bd show.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 func verifyBeadExists(beadID string) error {
-	cmd := exec.Command("bd", "--no-daemon", "show", beadID, "--json", "--allow-stale")
+	cmd := exec.Command("bd", "show", beadID, "--json", "--allow-stale")
 	cmd.Dir = resolveBeadDir(beadID)
 	out, err := cmd.Output()
 	if err != nil {
@@ -93,7 +93,7 @@ func verifyBeadExists(beadID string) error {
 // getBeadInfo returns status and assignee for a bead.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 func getBeadInfo(beadID string) (*beadInfo, error) {
-	cmd := exec.Command("bd", "--no-daemon", "show", beadID, "--json", "--allow-stale")
+	cmd := exec.Command("bd", "show", beadID, "--json", "--allow-stale")
 	cmd.Dir = resolveBeadDir(beadID)
 	out, err := cmd.Output()
 	if err != nil {
@@ -133,7 +133,7 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	issue := &beads.Issue{}
 	if logPath == "" {
 		// Read the bead once
-		showCmd := exec.Command("bd", "--no-daemon", "show", beadID, "--json", "--allow-stale")
+		showCmd := exec.Command("bd", "show", beadID, "--json", "--allow-stale")
 		showCmd.Dir = resolveBeadDir(beadID)
 		out, err := showCmd.Output()
 		if err != nil {
@@ -183,7 +183,7 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 		return nil
 	}
 
-	updateCmd := exec.Command("bd", "--no-daemon", "update", beadID, "--description="+newDesc)
+	updateCmd := exec.Command("bd", "update", beadID, "--description="+newDesc)
 	updateCmd.Stderr = os.Stderr
 	if err := updateCmd.Run(); err != nil {
 		return fmt.Errorf("updating bead description: %w", err)
@@ -469,7 +469,7 @@ func InstantiateFormulaOnBead(formulaName, beadID, title, hookWorkDir, townRoot 
 
 	// Step 1: Cook the formula (ensures proto exists)
 	if !skipCook {
-		cookCmd := exec.Command("bd", "--no-daemon", "cook", formulaName)
+		cookCmd := exec.Command("bd", "cook", formulaName)
 		cookCmd.Dir = formulaWorkDir
 		cookCmd.Env = append(os.Environ(), "GT_ROOT="+townRoot)
 		cookCmd.Stderr = os.Stderr
@@ -529,7 +529,7 @@ func InstantiateFormulaOnBead(formulaName, beadID, title, hookWorkDir, townRoot 
 // This is useful for batch mode where we cook once before processing multiple beads.
 // townRoot is required for GT_ROOT so bd can find town-level formulas.
 func CookFormula(formulaName, workDir, townRoot string) error {
-	cookCmd := exec.Command("bd", "--no-daemon", "cook", formulaName)
+	cookCmd := exec.Command("bd", "cook", formulaName)
 	cookCmd.Dir = workDir
 	cookCmd.Env = append(os.Environ(), "GT_ROOT="+townRoot)
 	cookCmd.Stderr = os.Stderr
