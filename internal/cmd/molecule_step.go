@@ -174,9 +174,10 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 // extractMoleculeIDFromStep extracts the molecule ID from a step ID.
 // Step IDs have format: mol-id.N where N is the step number.
 // Examples:
-//   gt-abc.1 -> gt-abc
-//   gt-xyz.3 -> gt-xyz
-//   bd-mol-abc.2 -> bd-mol-abc
+//
+//	gt-abc.1 -> gt-abc
+//	gt-xyz.3 -> gt-xyz
+//	bd-mol-abc.2 -> bd-mol-abc
 func extractMoleculeIDFromStep(stepID string) string {
 	// Find the last dot
 	lastDot := strings.LastIndex(stepID, ".")
