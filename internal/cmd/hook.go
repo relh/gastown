@@ -87,6 +87,35 @@ Output format (one line):
 	RunE: runHookShow,
 }
 
+// hookAttachCmd attaches a bead to your hook (alias for 'gt hook <bead-id>')
+var hookAttachCmd = &cobra.Command{
+	Use:   "attach <bead-id>",
+	Short: "Attach work to your hook",
+	Long: `Attach a bead to your hook (same as 'gt hook <bead-id>').
+
+Examples:
+  gt hook attach gt-abc               # Attach issue gt-abc to your hook`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runHook(cmd, args)
+	},
+}
+
+// hookDetachCmd detaches a bead from a hook (alias for 'gt hook clear')
+var hookDetachCmd = &cobra.Command{
+	Use:   "detach <bead-id> [target]",
+	Short: "Detach work from a hook",
+	Long: `Remove a specific bead from a hook (same as 'gt hook clear <bead-id>').
+
+Examples:
+  gt hook detach gt-abc               # Detach gt-abc from my hook
+  gt hook detach gt-abc gastown/nux   # Detach gt-abc from nux's hook`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runUnslingWith(cmd, args, hookDryRun, hookForce)
+	},
+}
+
 // hookClearCmd clears the hook (alias for 'gt unhook')
 var hookClearCmd = &cobra.Command{
 	Use:   "clear [bead-id] [target]",
@@ -130,12 +159,20 @@ func init() {
 	hookStatusCmd.Flags().BoolVar(&moleculeJSON, "json", false, "Output as JSON")
 	hookShowCmd.Flags().BoolVar(&moleculeJSON, "json", false, "Output as JSON")
 
+	// Flags for attach subcommand
+	hookAttachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Replace existing incomplete hooked bead")
+
+	// Flags for detach subcommand (mirror unsling flags)
+	hookDetachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Detach even if work is incomplete")
+
 	// Flags for clear subcommand (mirror unsling flags)
 	hookClearCmd.Flags().BoolVarP(&hookDryRun, "dry-run", "n", false, "Show what would be done")
 	hookClearCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Clear even if work is incomplete")
 
 	hookCmd.AddCommand(hookStatusCmd)
 	hookCmd.AddCommand(hookShowCmd)
+	hookCmd.AddCommand(hookAttachCmd)
+	hookCmd.AddCommand(hookDetachCmd)
 	hookCmd.AddCommand(hookClearCmd)
 
 	rootCmd.AddCommand(hookCmd)

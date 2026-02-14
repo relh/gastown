@@ -858,9 +858,19 @@
                 <div class="panel-header">
                     <h2>🪝 Hooks</h2>
                     <span class="count{{if .Hooks}} {{end}}">{{len .Hooks}}</span>
+                    <button class="hook-attach-btn" onclick="openHookAttachForm()">+ Attach</button>
+                    {{if .Hooks}}<button class="hook-clear-all-btn" onclick="clearAllHooks()">Clear All</button>{{end}}
                     <button class="expand-btn">Expand</button>
                 </div>
                 <div class="panel-body">
+                    <!-- Attach Hook Form (hidden by default) -->
+                    <div id="hook-attach-form" class="hook-attach-form" style="display:none;">
+                        <div class="hook-attach-form-row">
+                            <input type="text" id="hook-attach-bead" class="hook-attach-input" placeholder="Bead ID (e.g. gt-abc)">
+                            <button class="hook-attach-submit" onclick="submitHookAttach()">Attach</button>
+                            <button class="hook-attach-cancel" onclick="closeHookAttachForm()">Cancel</button>
+                        </div>
+                    </div>
                     {{if .Hooks}}
                     <table>
                         <thead>
@@ -869,6 +879,7 @@
                                 <th>Title</th>
                                 <th>Agent</th>
                                 <th>Hooked</th>
+                                <th></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -884,6 +895,7 @@
                                     {{.Age}}
                                     {{end}}
                                 </td>
+                                <td><button class="hook-detach-btn" data-hook-id="{{.ID}}" onclick="detachHook(this)">Detach</button></td>
                             </tr>
                             {{end}}
                         </tbody>
