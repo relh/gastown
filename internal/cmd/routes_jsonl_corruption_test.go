@@ -159,10 +159,7 @@ func TestRoutesJSONLCorruption(t *testing.T) {
 
 		// If routes.jsonl contains "title", it was corrupted with issue data
 		if strings.Contains(string(newRoutesContent), `"title"`) {
-			t.Log("BUG REPRODUCED: routes.jsonl was corrupted with issue data")
-			t.Log("Content:", string(newRoutesContent))
-			// This is expected behavior WITHOUT the fix
-			// The test passes if the fix prevents this
+			t.Errorf("routes.jsonl was corrupted with issue data: %s", string(newRoutesContent))
 		}
 	})
 }

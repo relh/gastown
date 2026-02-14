@@ -76,11 +76,9 @@ func TestIsBeadsRepo(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	b := New(tmpDir)
-	// This should return false since there's no .beads directory
-	// and bd list will fail
+	// Should return false since there's no .beads directory
 	if b.IsBeadsRepo() {
-		// This might pass if bd handles missing .beads gracefully
-		t.Log("IsBeadsRepo returned true for non-beads directory (bd might initialize)")
+		t.Error("IsBeadsRepo returned true for non-beads directory")
 	}
 }
 
