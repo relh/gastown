@@ -61,3 +61,6 @@ settings/
 .events.jsonl.lock
 .sqlhistory
 .fork-integration.json
+
+# Nix build
+result
