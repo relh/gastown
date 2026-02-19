@@ -1109,34 +1109,6 @@ func runCostsRecord(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--session flag required (or set GT_SESSION env var, or GT_RIG/GT_ROLE)")
 	}
 
-	// Fall back to workdir-based transcript discovery if stdin had no path
-	if transcriptPath == "" {
-		workDir := os.Getenv("GT_CWD")
-		if workDir == "" {
-			wd, err := getTmuxSessionWorkDir(sessionName)
-			if err != nil {
-				parseErrors = append(parseErrors,
-					fmt.Sprintf("no transcript_path on stdin, tmux workdir failed: %v", err))
-			} else {
-				workDir = wd
-			}
-		}
-
-		if workDir != "" {
-			projectDir, err := getClaudeProjectDir(workDir)
-			if err != nil {
-				parseErrors = append(parseErrors, fmt.Sprintf("project dir resolution failed: %v", err))
-			} else {
-				tp, err := findLatestTranscript(projectDir)
-				if err != nil {
-					parseErrors = append(parseErrors, fmt.Sprintf("transcript not found: %v", err))
-				} else {
-					transcriptPath = tp
-				}
-			}
-		}
-	}
-
 	// Parse transcript for token usage
 	var cost float64
 	var modelTokens map[string]*ModelTokenUsage
@@ -1145,6 +1117,7 @@ func runCostsRecord(cmd *cobra.Command, args []string) error {
 		usage, err := parseTranscriptUsage(transcriptPath)
 		if err != nil {
 			parseErrors = append(parseErrors, fmt.Sprintf("transcript parse failed: %v", err))
+			transcriptPath = "" // clear so workdir fallback runs
 		} else {
 			parseErrors = append(parseErrors, usage.ParseErrors...)
 			cost = calculateCost(usage)
@@ -1152,7 +1125,47 @@ func runCostsRecord(cmd *cobra.Command, args []string) error {
 				modelTokens = usage.ByModel
 			}
 		}
-	} else {
+	}
+
+	// Workdir-based fallback: runs when stdin had no path OR stdin path was invalid/stale
+	if transcriptPath == "" {
+		workDir := os.Getenv("GT_CWD")
+		if workDir == "" {
+			wd, err := getTmuxSessionWorkDir(sessionName)
+			if err != nil {
+				parseErrors = append(parseErrors,
+					fmt.Sprintf("workdir fallback: tmux workdir failed: %v", err))
+			} else {
+				workDir = wd
+			}
+		}
+
+		if workDir != "" {
+			projectDir, err := getClaudeProjectDir(workDir)
+			if err != nil {
+				parseErrors = append(parseErrors, fmt.Sprintf("workdir fallback: project dir resolution failed: %v", err))
+			} else {
+				tp, err := findLatestTranscript(projectDir)
+				if err != nil {
+					parseErrors = append(parseErrors, fmt.Sprintf("workdir fallback: transcript not found: %v", err))
+				} else {
+					usage, err := parseTranscriptUsage(tp)
+					if err != nil {
+						parseErrors = append(parseErrors, fmt.Sprintf("workdir fallback: transcript parse failed: %v", err))
+					} else {
+						parseErrors = append(parseErrors, usage.ParseErrors...)
+						cost = calculateCost(usage)
+						if len(usage.ByModel) > 0 {
+							modelTokens = usage.ByModel
+						}
+						transcriptPath = tp
+					}
+				}
+			}
+		}
+	}
+
+	if transcriptPath == "" {
 		parseErrors = append(parseErrors, "no transcript path available")
 	}
 
