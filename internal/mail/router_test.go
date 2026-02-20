@@ -146,42 +146,6 @@ func TestAddressToSessionIDs(t *testing.T) {
 	}
 }
 
-func TestAddressToSessionID(t *testing.T) {
-	// Set up prefix registry for test
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
-
-	// Deprecated wrapper - returns first candidate from AddressToSessionIDs
-	tests := []struct {
-		address string
-		want    string
-	}{
-		{"overseer", "hq-overseer"},
-		{"mayor", "hq-mayor"},
-		{"mayor/", "hq-mayor"},
-		{"deacon", "hq-deacon"},
-		{"gastown/refinery", "gt-refinery"},
-		{"gastown/Toast", "gt-crew-Toast"}, // First candidate is crew
-		{"beads/witness", "bd-witness"},
-		{"gastown/", ""},   // Empty target
-		{"gastown", ""},    // No slash
-		{"", ""},           // Empty address
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.address, func(t *testing.T) {
-			got := addressToSessionID(tt.address)
-			if got != tt.want {
-				t.Errorf("addressToSessionID(%q) = %q, want %q", tt.address, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsSelfMail(t *testing.T) {
 	tests := []struct {
 		from string
@@ -272,7 +236,7 @@ func TestShouldBeWisp(t *testing.T) {
 func TestResolveBeadsDir(t *testing.T) {
 	// With town root set
 	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
-	got := r.resolveBeadsDir("gastown/Toast")
+	got := r.resolveBeadsDir()
 	want := "/home/user/gt/.beads"
 	if filepath.ToSlash(got) != want {
 		t.Errorf("resolveBeadsDir with townRoot = %q, want %q", got, want)
@@ -280,7 +244,7 @@ func TestResolveBeadsDir(t *testing.T) {
 
 	// Without town root (fallback to workDir)
 	r2 := &Router{workDir: "/work/dir", townRoot: ""}
-	got2 := r2.resolveBeadsDir("mayor/")
+	got2 := r2.resolveBeadsDir()
 	want2 := "/work/dir/.beads"
 	if filepath.ToSlash(got2) != want2 {
 		t.Errorf("resolveBeadsDir without townRoot = %q, want %q", got2, want2)

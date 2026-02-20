@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -107,6 +108,31 @@ func collectExistingMolecules(info *beadInfo) []string {
 	return molecules
 }
 
+// ensureNoExistingMolecules checks whether a bead already has attached molecules
+// and either burns them (with --force) or returns an error. Returns nil when no
+// molecules exist or they were successfully burned. Dry-run mode only prints.
+func ensureNoExistingMolecules(info *beadInfo, beadID, townRoot string, force, dryRun bool) error {
+	existingMolecules := collectExistingMolecules(info)
+	if len(existingMolecules) == 0 {
+		return nil
+	}
+	if dryRun {
+		fmt.Printf("  Would burn %d stale molecule(s): %s\n",
+			len(existingMolecules), strings.Join(existingMolecules, ", "))
+		return nil
+	}
+	if !force {
+		return fmt.Errorf("bead %s already has %d attached molecule(s): %s\nUse --force to replace, or --hook-raw-bead to skip formula",
+			beadID, len(existingMolecules), strings.Join(existingMolecules, ", "))
+	}
+	fmt.Printf("  %s Burning %d stale molecule(s) from previous assignment: %s\n",
+		style.Warning.Render("⚠"), len(existingMolecules), strings.Join(existingMolecules, ", "))
+	if err := burnExistingMolecules(existingMolecules, beadID, townRoot); err != nil {
+		return fmt.Errorf("burning stale molecules: %w", err)
+	}
+	return nil
+}
+
 // burnExistingMolecules detaches and burns all molecule wisps attached to a bead.
 // First detaches the molecule from the base bead (clears attached_molecule in description),
 // then force-closes the orphaned wisp beads. Returns an error if detach fails, since
@@ -191,6 +217,9 @@ type beadFieldUpdates struct {
 	Args             string // Natural language instructions
 	AttachedMolecule string // Wisp root ID
 	NoMerge          bool   // Skip merge queue on completion
+	Mode             string // Execution mode: "" (normal) or "ralph"
+	ConvoyID         string // Convoy bead ID (e.g., "hq-cv-abc")
+	MergeStrategy    string // Convoy merge strategy: "direct", "mr", "local"
 }
 
 // storeFieldsInBead performs a single read-modify-write to update all attachment fields
@@ -244,6 +273,15 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	}
 	if updates.NoMerge {
 		fields.NoMerge = true
+	}
+	if updates.Mode != "" {
+		fields.Mode = updates.Mode
+	}
+	if updates.ConvoyID != "" {
+		fields.ConvoyID = updates.ConvoyID
+	}
+	if updates.MergeStrategy != "" {
+		fields.MergeStrategy = updates.MergeStrategy
 	}
 
 	// Write back once
@@ -520,10 +558,19 @@ func wakeRigAgents(rigName string) {
 	bootCmd := exec.Command("gt", "rig", "boot", rigName)
 	_ = bootCmd.Run() // Ignore errors - rig might already be running
 
+	// Verify daemon is running — polecat triggering depends on daemon
+	// processing deacon mail. Warn if not running (gt-9wv0).
+	townRoot, _ := workspace.FindFromCwd()
+	if townRoot != "" {
+		if running, _, _ := daemon.IsRunning(townRoot); !running {
+			fmt.Fprintf(os.Stderr, "Warning: daemon is not running. Polecat may not auto-start.\n")
+			fmt.Fprintf(os.Stderr, "  Start with: gt daemon start\n")
+		}
+	}
+
 	// Queue nudge to witness for cooperative delivery.
 	// This avoids interrupting in-flight tool calls.
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
 		if err := nudge.Enqueue(townRoot, witnessSession, nudge.QueuedNudge{
 			Sender:  "sling",
@@ -836,4 +883,30 @@ func shouldAcceptPermissionWarning(agentName string) bool {
 		return false
 	}
 	return preset.EmitsPermissionWarning
+}
+
+// updateAgentMode updates the mode field on the agent bead.
+// This is needed so the stuck detector can read the mode from agent fields
+// and apply appropriate thresholds (ralphcats get longer leash).
+func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
+	_ = townBeadsDir // Not used - BEADS_DIR breaks redirect mechanism
+
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return
+	}
+	if workDir == "" {
+		workDir = townRoot
+	}
+
+	agentBeadID := agentIDToBeadID(agentID, townRoot)
+	if agentBeadID == "" {
+		return
+	}
+
+	agentWorkDir := beads.ResolveHookDir(townRoot, agentBeadID, workDir)
+	bd := beads.New(agentWorkDir)
+	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{Mode: &mode}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s mode: %v\n", agentBeadID, err)
+	}
 }

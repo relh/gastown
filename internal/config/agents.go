@@ -31,6 +31,8 @@ const (
 	AgentOpenCode AgentPreset = "opencode"
 	// AgentCopilot is GitHub Copilot CLI.
 	AgentCopilot AgentPreset = "copilot"
+	// AgentPi is Pi Coding Agent (extension-based lifecycle).
+	AgentPi AgentPreset = "pi"
 )
 
 // AgentPresetInfo contains the configuration details for an agent preset.
@@ -61,10 +63,15 @@ type AgentPresetInfo struct {
 	// Used for resuming sessions across restarts.
 	SessionIDEnv string `json:"session_id_env,omitempty"`
 
-	// ResumeFlag is the flag/subcommand for resuming sessions.
+	// ResumeFlag is the flag/subcommand for resuming a specific session.
 	// For claude/gemini: "--resume"
 	// For codex: "resume" (subcommand)
 	ResumeFlag string `json:"resume_flag,omitempty"`
+
+	// ContinueFlag is the flag for auto-resuming the most recent session.
+	// For claude: "--continue" (--resume without args opens interactive picker)
+	// If empty, --resume without a session ID is rejected with a clear error.
+	ContinueFlag string `json:"continue_flag,omitempty"`
 
 	// ResumeStyle indicates how to invoke resume:
 	// "flag" - pass as --resume <id> argument
@@ -159,6 +166,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		ProcessNames:        []string{"node", "claude"}, // Claude runs as Node.js
 		SessionIDEnv:        "CLAUDE_SESSION_ID",
 		ResumeFlag:          "--resume",
+		ContinueFlag:        "--continue",
 		ResumeStyle:         "flag",
 		SupportsHooks:       true,
 		SupportsForkSession: true,
@@ -313,6 +321,24 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		ReadyPromptPrefix:  "❯ ",
 		ReadyDelayMs:       5000,
 		InstructionsFile:   "AGENTS.md",
+	},
+	AgentPi: {
+		Name:                AgentPi,
+		Command:             "pi",
+		Args:                []string{}, // Extension loaded via -e flag in town settings
+		ProcessNames:        []string{"pi", "node", "bun"}, // Pi runs as Node.js
+		SessionIDEnv:        "PI_SESSION_ID",
+		ResumeFlag:          "",    // No resume support yet
+		ResumeStyle:         "",
+		SupportsHooks:       true,  // Uses .pi/extensions/gastown-hooks.js
+		HooksProvider:       "pi",
+		HooksDir:            ".pi/extensions",
+		HooksSettingsFile:   "gastown-hooks.js",
+		SupportsForkSession: false,
+		NonInteractive: &NonInteractiveConfig{
+			PromptFlag: "-p",
+			OutputFlag: "--no-session",
+		},
 	},
 }
 

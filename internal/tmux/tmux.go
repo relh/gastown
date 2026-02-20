@@ -1228,6 +1228,80 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	return time.Unix(timestamp, 0), nil
 }
 
+// ZombieStatus describes the liveness state of a tmux agent session.
+type ZombieStatus int
+
+const (
+	// SessionHealthy means the session exists and the agent process is alive.
+	SessionHealthy ZombieStatus = iota
+	// SessionDead means the tmux session does not exist.
+	SessionDead
+	// AgentDead means the tmux session exists but the agent process has died.
+	AgentDead
+	// AgentHung means the tmux session and agent process exist but there has
+	// been no tmux activity for longer than the specified threshold.
+	AgentHung
+)
+
+// String returns a human-readable label for the zombie status.
+func (z ZombieStatus) String() string {
+	switch z {
+	case SessionHealthy:
+		return "healthy"
+	case SessionDead:
+		return "session-dead"
+	case AgentDead:
+		return "agent-dead"
+	case AgentHung:
+		return "agent-hung"
+	default:
+		return "unknown"
+	}
+}
+
+// IsZombie returns true if the status represents a zombie (any non-healthy state
+// where the session exists but the agent is dead or hung).
+func (z ZombieStatus) IsZombie() bool {
+	return z == AgentDead || z == AgentHung
+}
+
+// CheckSessionHealth determines the health status of an agent session.
+// It performs three levels of checking:
+//  1. Session existence (tmux has-session)
+//  2. Agent process liveness (IsAgentAlive — checks process tree)
+//  3. Activity staleness (GetSessionActivity — checks tmux output timestamp)
+//
+// The maxInactivity parameter controls how long a session can be idle before
+// being considered hung. Pass 0 to skip activity checking (only check process
+// liveness). A reasonable default for production is 10-15 minutes.
+//
+// This is the preferred unified method for zombie detection across all agent types.
+func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) ZombieStatus {
+	// Level 1: Does the tmux session exist?
+	alive, err := t.HasSession(session)
+	if err != nil || !alive {
+		return SessionDead
+	}
+
+	// Level 2: Is the agent process running inside the session?
+	if !t.IsAgentAlive(session) {
+		return AgentDead
+	}
+
+	// Level 3: Has there been recent activity? (optional)
+	if maxInactivity > 0 {
+		lastActivity, err := t.GetSessionActivity(session)
+		if err == nil && !lastActivity.IsZero() {
+			if time.Since(lastActivity) > maxInactivity {
+				return AgentHung
+			}
+		}
+		// On error or zero time, skip activity check — don't false-positive
+	}
+
+	return SessionHealthy
+}
+
 // processMatchesNames checks if a process's binary name matches any of the given names.
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
@@ -1296,12 +1370,6 @@ func hasDescendantWithNames(pid string, names []string, depth int) bool {
 		}
 	}
 	return false
-}
-
-// hasChildWithNames checks if a process has a child matching any of the given names.
-// Deprecated: Use hasDescendantWithNames for more robust detection.
-func hasChildWithNames(pid string, names []string) bool {
-	return hasDescendantWithNames(pid, names, 0)
 }
 
 // FindSessionByWorkDir finds tmux sessions where the pane's current working directory
@@ -1888,11 +1956,26 @@ func IsInsideTmux() bool {
 
 // SetMailClickBinding configures left-click on status-right to show mail preview.
 // This creates a popup showing the first unread message when clicking the mail icon area.
+//
+// The binding is conditional: it only activates in Gas Town sessions (those matching
+// a registered rig prefix or "hq-"). In non-GT sessions, the user's original
+// MouseDown1StatusRight binding (if any) is preserved.
+// See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetMailClickBinding(session string) error {
-	// Bind left-click on status-right to show mail popup
-	// The popup runs gt mail peek and closes on any key
+	// Skip if already configured — preserves user's original fallback from first call
+	if t.isGTBinding("root", "MouseDown1StatusRight") {
+		return nil
+	}
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	fallback := t.getKeyBinding("root", "MouseDown1StatusRight")
+	if fallback == "" {
+		// No prior binding — do nothing in non-GT sessions
+		fallback = ":"
+	}
 	_, err := t.run("bind-key", "-T", "root", "MouseDown1StatusRight",
-		"display-popup", "-E", "-w", "60", "-h", "15", "gt mail peek || echo 'No unread mail'")
+		"if-shell", ifShell,
+		"display-popup -E -w 60 -h 15 'gt mail peek || echo No unread mail'",
+		fallback)
 	return err
 }
 
@@ -1963,6 +2046,116 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 	return t.SetCycleBindings(session)
 }
 
+// isGTBinding checks if the given key already has a Gas Town if-shell binding.
+// Used to skip redundant re-binding on repeated ConfigureGasTownSession calls,
+// preserving the user's original fallback captured on the first call.
+func (t *Tmux) isGTBinding(table, key string) bool {
+	output, err := t.run("list-keys", "-T", table, key)
+	if err != nil || output == "" {
+		return false
+	}
+	// GT bindings use if-shell with a run-shell/display-popup invoking "gt ".
+	// Require both "if-shell" and "gt " to avoid false positives on user
+	// bindings that happen to contain "gt " without the if-shell guard.
+	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ")
+}
+
+// getKeyBinding returns the current tmux command bound to the given key in the
+// specified key table. Returns empty string if no binding exists or if querying
+// fails. This is used to capture user bindings before overwriting them, so the
+// original binding can be preserved in the else branch of an if-shell guard.
+//
+// The returned string is a tmux command (e.g., "next-window", "run-shell 'lazygit'")
+// suitable for use as a command argument to bind-key or if-shell.
+//
+// If the existing binding is already a Gas Town if-shell binding (detected by
+// the presence of both "if-shell" and "gt " in the output), it is treated as
+// no prior binding to avoid recursive wrapping on repeated calls.
+func (t *Tmux) getKeyBinding(table, key string) string {
+	// tmux list-keys -T <table> <key> outputs a line like:
+	//   bind-key -T prefix g if-shell "..." "run-shell 'gt agents'" ":"
+	// We need to extract just the command portion.
+	//
+	// Assumed format (tested with tmux 3.3+):
+	//   bind-key [-r] -T <table> <key> <command...>
+	// If tmux changes this format, parsing fails safely (returns ""),
+	// which causes the caller to use its default fallback.
+	output, err := t.run("list-keys", "-T", table, key)
+	if err != nil || output == "" {
+		return ""
+	}
+
+	// If this is already a Gas Town binding (from a previous ConfigureGasTownSession call),
+	// don't capture it — we'd end up wrapping our own if-shell in another if-shell.
+	// We check for both "if-shell" and "gt " to avoid false-positiving on user
+	// bindings that happen to contain the substring "gt ".
+	if strings.Contains(output, "if-shell") && strings.Contains(output, "gt ") {
+		return ""
+	}
+
+	// Parse the binding command from list-keys output.
+	// Format: "bind-key [-r] -T <table> <key> <command...>"
+	// We need everything after the key name.
+	// Find the key in the output and take everything after it.
+	fields := strings.Fields(output)
+	keyIdx := -1
+	for i, f := range fields {
+		if f == "-T" && i+2 < len(fields) {
+			// Skip table name, the next field is the key
+			keyIdx = i + 2
+			break
+		}
+	}
+	if keyIdx < 0 || keyIdx >= len(fields)-1 {
+		return ""
+	}
+
+	// Everything after the key is the command
+	// Rejoin from keyIdx+1 onward, but we need to preserve the original spacing.
+	// Find the key token in the original string and take everything after it.
+	idx := strings.Index(output, " "+fields[keyIdx]+" ")
+	if idx < 0 {
+		return ""
+	}
+	cmd := strings.TrimSpace(output[idx+len(" "+fields[keyIdx]+" "):])
+	if cmd == "" {
+		return ""
+	}
+
+	return cmd
+}
+
+// safePrefixRe matches the character set guaranteed by beadsPrefixRegexp in
+// internal/rig/manager.go.  Used as defense-in-depth: if rigs.json is
+// hand-edited with regex metacharacters or shell-special chars, we skip the
+// entry rather than injecting it into a grep -Eq / tmux if-shell fragment.
+var safePrefixRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,19}$`)
+
+// sessionPrefixPattern returns a grep -Eq pattern that matches any registered
+// Gas Town session name.  The pattern is built dynamically from rigs.json
+// (via config.AllRigPrefixes) so that rigs beyond gastown/hq are recognized.
+// "hq" is always included because it lives outside the rig registry
+// (town-level services).
+//
+// Example output: "^(bd|db|fa|gl|gt|hq|la|lc)-"
+func sessionPrefixPattern() string {
+	seen := map[string]bool{"hq": true, "gt": true} // always include HQ + gastown fallback
+	townRoot := os.Getenv("GT_ROOT")
+	if townRoot != "" {
+		for _, p := range config.AllRigPrefixes(townRoot) {
+			if safePrefixRe.MatchString(p) {
+				seen[p] = true
+			}
+		}
+	}
+	sorted := make([]string, 0, len(seen))
+	for p := range seen {
+		sorted = append(sorted, p)
+	}
+	sort.Strings(sorted)
+	return "^(" + strings.Join(sorted, "|") + ")-"
+}
+
 // SetCycleBindings sets up C-b n/p to cycle through related sessions.
 // The gt cycle command automatically detects the session type and cycles
 // within the appropriate group:
@@ -1970,27 +2163,46 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 // - Crew sessions: All crew members in the same rig
 //
 // IMPORTANT: These bindings are conditional - they only run gt cycle for
-// Gas Town sessions (those starting with "gt-" or "hq-"). For non-GT sessions,
-// the default tmux behavior (next-window/previous-window) is preserved.
+// Gas Town sessions (those matching a registered rig prefix or "hq-").
+// For non-GT sessions, the user's original binding is preserved. If no
+// prior binding existed, the tmux defaults (next-window/previous-window)
+// are used.
 // See: https://github.com/steveyegge/gastown/issues/13
+// See: https://github.com/steveyegge/gastown/issues/1548
 //
 // IMPORTANT: We pass #{session_name} to the command because run-shell doesn't
 // reliably preserve the session context. tmux expands #{session_name} at binding
 // resolution time (when the key is pressed), giving us the correct session.
 func (t *Tmux) SetCycleBindings(session string) error {
-	// C-b n → gt cycle next for GT sessions, next-window otherwise
-	// The if-shell checks if session name starts with "gt-" or "hq-"
+	// Skip if already configured — preserves user's original fallback from first call
+	if t.isGTBinding("prefix", "n") {
+		return nil
+	}
+	pattern := sessionPrefixPattern()
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", pattern)
+
+	// Capture existing bindings before overwriting, falling back to tmux defaults
+	nextFallback := t.getKeyBinding("prefix", "n")
+	if nextFallback == "" {
+		nextFallback = "next-window"
+	}
+	prevFallback := t.getKeyBinding("prefix", "p")
+	if prevFallback == "" {
+		prevFallback = "previous-window"
+	}
+
+	// C-b n → gt cycle next for Gas Town sessions, original binding otherwise
 	if _, err := t.run("bind-key", "-T", "prefix", "n",
-		"if-shell", "echo '#{session_name}' | grep -Eq '^(gt|hq)-'",
+		"if-shell", ifShell,
 		"run-shell 'gt cycle next --session #{session_name}'",
-		"next-window"); err != nil {
+		nextFallback); err != nil {
 		return err
 	}
-	// C-b p → gt cycle prev for GT sessions, previous-window otherwise
+	// C-b p → gt cycle prev for Gas Town sessions, original binding otherwise
 	if _, err := t.run("bind-key", "-T", "prefix", "p",
-		"if-shell", "echo '#{session_name}' | grep -Eq '^(gt|hq)-'",
+		"if-shell", ifShell,
 		"run-shell 'gt cycle prev --session #{session_name}'",
-		"previous-window"); err != nil {
+		prevFallback); err != nil {
 		return err
 	}
 	return nil
@@ -2001,14 +2213,26 @@ func (t *Tmux) SetCycleBindings(session string) error {
 // Uses `gt feed --window` which handles both creation and switching.
 //
 // IMPORTANT: This binding is conditional - it only runs for Gas Town sessions
-// (those starting with "gt-" or "hq-"). For non-GT sessions, a help message is shown.
+// (those matching a registered rig prefix or "hq-"). For non-GT sessions, the
+// user's original binding is preserved. If no prior binding existed, the key
+// press is silently ignored.
 // See: https://github.com/steveyegge/gastown/issues/13
+// See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetFeedBinding(session string) error {
-	// C-b a → gt feed --window for GT sessions, help message otherwise
+	// Skip if already configured — preserves user's original fallback from first call
+	if t.isGTBinding("prefix", "a") {
+		return nil
+	}
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	fallback := t.getKeyBinding("prefix", "a")
+	if fallback == "" {
+		// No prior binding — do nothing in non-GT sessions
+		fallback = ":"
+	}
 	_, err := t.run("bind-key", "-T", "prefix", "a",
-		"if-shell", "echo '#{session_name}' | grep -Eq '^(gt|hq)-'",
+		"if-shell", ifShell,
 		"run-shell 'gt feed --window'",
-		"display-message 'C-b a is for Gas Town sessions only'")
+		fallback)
 	return err
 }
 
@@ -2016,13 +2240,25 @@ func (t *Tmux) SetFeedBinding(session string) error {
 // This runs `gt agents` which displays a tmux popup with all Gas Town agents.
 //
 // IMPORTANT: This binding is conditional - it only runs for Gas Town sessions
-// (those starting with "gt-" or "hq-"). For non-GT sessions, a help message is shown.
+// (those matching a registered rig prefix or "hq-"). For non-GT sessions, the
+// user's original binding is preserved. If no prior binding existed, the key
+// press is silently ignored.
+// See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetAgentsBinding(session string) error {
-	// C-b g → gt agents for GT sessions, help message otherwise
+	// Skip if already configured — preserves user's original fallback from first call
+	if t.isGTBinding("prefix", "g") {
+		return nil
+	}
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	fallback := t.getKeyBinding("prefix", "g")
+	if fallback == "" {
+		// No prior binding — do nothing in non-GT sessions
+		fallback = ":"
+	}
 	_, err := t.run("bind-key", "-T", "prefix", "g",
-		"if-shell", "echo '#{session_name}' | grep -Eq '^(gt|hq)-'",
+		"if-shell", ifShell,
 		"run-shell 'gt agents'",
-		"display-message 'C-b g is for Gas Town sessions only'")
+		fallback)
 	return err
 }
 
@@ -2061,18 +2297,21 @@ func CurrentSessionName() string {
 // A zombie session is one where tmux is alive but the Claude process has died.
 // This runs at `gt start` time to prevent session name conflicts and resource accumulation.
 //
+// The isGTSession predicate identifies Gas Town sessions (e.g. session.IsKnownSession).
+// It is passed as a parameter to avoid a circular import from tmux → session.
+//
 // Returns:
 //   - cleaned: number of zombie sessions that were killed
 //   - err: error if session listing failed (individual kill errors are logged but not returned)
-func (t *Tmux) CleanupOrphanedSessions() (cleaned int, err error) {
+func (t *Tmux) CleanupOrphanedSessions(isGTSession func(string) bool) (cleaned int, err error) {
 	sessions, err := t.ListSessions()
 	if err != nil {
 		return 0, fmt.Errorf("listing sessions: %w", err)
 	}
 
 	for _, sess := range sessions {
-		// Only process Gas Town sessions (gt-* for rigs, hq-* for town-level)
-		if !strings.HasPrefix(sess, "gt-") && !strings.HasPrefix(sess, "hq-") {
+		// Only process Gas Town sessions
+		if !isGTSession(sess) {
 			continue
 		}
 
@@ -2150,27 +2389,3 @@ func (t *Tmux) SetAutoRespawnHook(session string) error {
 	return nil
 }
 
-// SetGlobalDeaconRespawnHook sets up a global hook that respawns hq-deacon panes.
-// DEPRECATED: Global pane-died hooks don't fire reliably in tmux 3.2a.
-// Use SetAutoRespawnHook with per-session hooks instead (called by deacon manager).
-//
-// Keeping this function for reference in case tmux behavior changes in future versions.
-func (t *Tmux) SetGlobalDeaconRespawnHook() error {
-	// Hook command that only respawns hq-deacon sessions
-	// Uses #{session_name} to check if this is the deacon session
-	// #{pane_id} identifies the exact pane that died
-	// IMPORTANT: We must re-enable remain-on-exit after respawn-pane resets it!
-	//
-	// NOTE: Testing showed global pane-died hooks don't fire in tmux 3.2a,
-	// even though per-session hooks work correctly. The per-session approach
-	// in SetAutoRespawnHook is the reliable solution.
-	hookCmd := `run-shell "if [ '#{session_name}' = 'hq-deacon' ]; then sleep 3 && tmux respawn-pane -k -t #{pane_id} && tmux set-option -t #{session_name} remain-on-exit on; fi"`
-
-	// Set as a global hook so it applies to all sessions
-	_, err := t.run("set-hook", "-g", "pane-died", hookCmd)
-	if err != nil {
-		return fmt.Errorf("setting global pane-died hook: %w", err)
-	}
-
-	return nil
-}

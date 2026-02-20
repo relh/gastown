@@ -192,14 +192,11 @@ func detectTownRoot(startDir string) string {
 	return townRoot
 }
 
-// resolveBeadsDir returns the correct .beads directory for the given address.
+// resolveBeadsDir returns the correct .beads directory for mail delivery.
 //
-// Two-level beads architecture:
-// - ALL mail uses town beads ({townRoot}/.beads) regardless of address
-// - Rig-level beads ({rig}/.beads) are for project issues only, not mail
-//
-// This ensures messages are visible to all agents in the town.
-func (r *Router) resolveBeadsDir(_ string) string { // address unused: all mail uses town-level beads
+// All mail uses town beads ({townRoot}/.beads). Rig-level beads ({rig}/.beads)
+// are for project issues only, not mail.
+func (r *Router) resolveBeadsDir() string {
 	// If no town root, fall back to workDir's .beads
 	if r.townRoot == "" {
 		return filepath.Join(r.workDir, ".beads")
@@ -660,7 +657,7 @@ func (r *Router) queryAgents(descContains string) []*agentBead {
 	var allAgents []*agentBead
 
 	// Query town-level beads
-	townBeadsDir := r.resolveBeadsDir("")
+	townBeadsDir := r.resolveBeadsDir()
 	townAgents, err := r.queryAgentsInDir(townBeadsDir, descContains)
 	if err != nil {
 		// Don't fail yet - rig beads might still have results
@@ -904,6 +901,7 @@ func (r *Router) sendToSingle(msg *Message) error {
 	var labels []string
 	labels = append(labels, "gt:message")
 	labels = append(labels, "from:"+msg.From)
+	labels = append(labels, DeliverySendLabels()...)
 	if msg.ThreadID != "" {
 		labels = append(labels, "thread:"+msg.ThreadID)
 	}
@@ -945,7 +943,7 @@ func (r *Router) sendToSingle(msg *Message) error {
 	// This prevents subjects like "--help" or "--json" from being parsed as flags.
 	args = append(args, "--", msg.Subject)
 
-	beadsDir := r.resolveBeadsDir(msg.To)
+	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
@@ -1032,6 +1030,7 @@ func (r *Router) sendToQueue(msg *Message) error {
 	labels = append(labels, "gt:message")
 	labels = append(labels, "from:"+msg.From)
 	labels = append(labels, "queue:"+queueName)
+	labels = append(labels, DeliverySendLabels()...)
 	if msg.ThreadID != "" {
 		labels = append(labels, "thread:"+msg.ThreadID)
 	}
@@ -1071,7 +1070,7 @@ func (r *Router) sendToQueue(msg *Message) error {
 	args = append(args, "--", msg.Subject)
 
 	// Queue messages go to town-level beads (shared location)
-	beadsDir := r.resolveBeadsDir("")
+	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
@@ -1108,7 +1107,10 @@ func (r *Router) sendToAnnounce(msg *Message) error {
 		}
 	}
 
-	// Build labels for type, from/thread/reply-to/cc plus announce metadata
+	// Build labels for type, from/thread/reply-to/cc plus announce metadata.
+	// Note: delivery:pending is intentionally omitted for announce messages —
+	// broadcast messages have no single recipient to ack against. Subscriber
+	// fan-out copies go through sendToSingle which adds delivery tracking.
 	var labels []string
 	labels = append(labels, "gt:message")
 	labels = append(labels, "from:"+msg.From)
@@ -1152,7 +1154,7 @@ func (r *Router) sendToAnnounce(msg *Message) error {
 	args = append(args, "--", msg.Subject)
 
 	// Announce messages go to town-level beads (shared location)
-	beadsDir := r.resolveBeadsDir("")
+	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
@@ -1191,7 +1193,10 @@ func (r *Router) sendToChannel(msg *Message) error {
 		return fmt.Errorf("channel %s is closed", channelName)
 	}
 
-	// Build labels for type, from/thread/reply-to/cc plus channel metadata
+	// Build labels for type, from/thread/reply-to/cc plus channel metadata.
+	// Note: delivery:pending is intentionally omitted for the channel-origin
+	// copy — it has no single recipient to ack. Subscriber fan-out copies go
+	// through sendToSingle which adds delivery tracking.
 	var labels []string
 	labels = append(labels, "gt:message")
 	labels = append(labels, "from:"+msg.From)
@@ -1235,7 +1240,7 @@ func (r *Router) sendToChannel(msg *Message) error {
 	args = append(args, "--", msg.Subject)
 
 	// Channel messages go to town-level beads (shared location)
-	beadsDir := r.resolveBeadsDir("")
+	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
@@ -1283,7 +1288,7 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		return nil // No retention limit
 	}
 
-	beadsDir := r.resolveBeadsDir("")
+	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
@@ -1342,7 +1347,7 @@ func isSelfMail(from, to string) bool {
 // GetMailbox returns a Mailbox for the given address.
 // Routes to the correct beads database based on the address.
 func (r *Router) GetMailbox(address string) (*Mailbox, error) {
-	beadsDir := r.resolveBeadsDir(address)
+	beadsDir := r.resolveBeadsDir()
 	workDir := filepath.Dir(beadsDir) // Parent of .beads
 	return NewMailboxFromAddress(address, workDir), nil
 }
@@ -1553,13 +1558,3 @@ func AddressToSessionIDs(address string) []string {
 	}
 }
 
-// addressToSessionID converts a mail address to a tmux session ID.
-// Returns empty string if address format is not recognized.
-// Deprecated: Use AddressToSessionIDs for proper crew/polecat handling.
-func addressToSessionID(address string) string {
-	ids := AddressToSessionIDs(address)
-	if len(ids) == 0 {
-		return ""
-	}
-	return ids[0]
-}

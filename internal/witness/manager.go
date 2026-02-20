@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -38,11 +39,25 @@ func NewManager(r *rig.Rig) *Manager {
 	}
 }
 
-// IsRunning checks if the witness session is active.
-// ZFC: tmux session existence is the source of truth.
+// IsRunning checks if the witness session is active and healthy.
+// Checks both tmux session existence AND agent process liveness to avoid
+// reporting zombie sessions (tmux alive but Claude dead) as "running".
+// ZFC: tmux session existence is the source of truth for session state,
+// but agent liveness determines if the session is actually functional.
 func (m *Manager) IsRunning() (bool, error) {
 	t := tmux.NewTmux()
-	return t.HasSession(m.SessionName())
+	status := t.CheckSessionHealth(m.SessionName(), 0)
+	return status == tmux.SessionHealthy, nil
+}
+
+// IsHealthy checks if the witness is running and has been active recently.
+// Unlike IsRunning which only checks process liveness, this also detects hung
+// sessions where Claude is alive but hasn't produced output in maxInactivity.
+// Returns the detailed ZombieStatus for callers that need to distinguish
+// between different failure modes.
+func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
+	t := tmux.NewTmux()
+	return t.CheckSessionHealth(m.SessionName(), maxInactivity)
 }
 
 // SessionName returns the tmux session name for this witness.
@@ -131,7 +146,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 
 	// Ensure .gitignore has required Gas Town patterns
 	if err := rig.EnsureGitignorePatterns(witnessDir); err != nil {
-		fmt.Printf("Warning: could not update witness .gitignore: %v\n", err)
+		style.PrintWarning("could not update witness .gitignore: %v", err)
 	}
 
 	roleConfig, err := m.roleConfig()
@@ -239,7 +254,7 @@ func buildWitnessStartCommand(rigPath, rigName, townRoot, agentOverride string, 
 		return beads.ExpandRolePattern(roleConfig.StartCommand, townRoot, rigName, "", "witness"), nil
 	}
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
-		Recipient: fmt.Sprintf("%s/witness", rigName),
+		Recipient: session.BeaconRecipient("witness", "", rigName),
 		Sender:    "deacon",
 		Topic:     "patrol",
 	}, "Run `gt prime --hook` and begin patrol.")

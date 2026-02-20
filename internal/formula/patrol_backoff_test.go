@@ -76,6 +76,10 @@ func TestPatrolFormulasHaveBackoffLogic(t *testing.T) {
 // the wisp via status=hooked on session restart.
 //
 // Regression test for steveyegge/gastown#1371.
+//
+// Also enforces that squash uses `gt mol squash --jitter` to desynchronize
+// concurrent Dolt lock acquisitions from deacon/witness/refinery patrol agents.
+// See: hq-vytww2 (Reduce Dolt lock contention from concurrent patrol agents).
 func TestPatrolFormulasHaveSquashCycle(t *testing.T) {
 	type patrolFormula struct {
 		name       string
@@ -114,14 +118,15 @@ func TestPatrolFormulasHaveSquashCycle(t *testing.T) {
 			}
 
 			// The loop step must contain all three parts of the cycle:
-			// 1. Squash the current wisp
+			// 1. Squash the current wisp (using gt mol squash --jitter to reduce lock contention)
 			// 2. Create a new patrol wisp
 			// 3. Hook/assign the new wisp
 			requiredPatterns := []struct {
 				pattern string
 				reason  string
 			}{
-				{"bd mol squash", "squash current wisp to reset step beads"},
+				{"gt mol squash", "squash current wisp using gt command (not bd) for jitter support"},
+				{"--jitter", "jitter flag required to desynchronize concurrent Dolt lock acquisitions (hq-vytww2)"},
 				{fmt.Sprintf("bd mol wisp %s", pf.molName), "create new patrol wisp for next cycle"},
 				{"--status=hooked", "hook the new wisp so findActivePatrol can find it"},
 			}
@@ -129,10 +134,60 @@ func TestPatrolFormulasHaveSquashCycle(t *testing.T) {
 			for _, rp := range requiredPatterns {
 				if !strings.Contains(loopDesc, rp.pattern) {
 					t.Errorf("%s %s step missing %q (%s)\n"+
-						"All patrol formulas must include the squash/create-wisp/hook cycle.\n"+
-						"See steveyegge/gastown#1371.",
+						"All patrol formulas must include the squash/create-wisp/hook cycle with jitter.\n"+
+						"See steveyegge/gastown#1371 (squash cycle) and hq-vytww2 (jitter requirement).",
 						pf.name, pf.loopStepID, rp.pattern, rp.reason)
 				}
+			}
+		})
+	}
+}
+
+// TestPatrolFormulasHaveWispGC verifies that all three patrol formulas
+// include `bd mol wisp gc` in their inbox-check step to clean up stale
+// wisps from abnormal exits in previous cycles.
+//
+// Without this, patrol agents that die/restart abnormally before reaching
+// the loop-or-exit squash step leave their wisps open indefinitely.
+//
+// Regression test for steveyegge/gastown#1712.
+func TestPatrolFormulasHaveWispGC(t *testing.T) {
+	patrolFormulas := []string{
+		"mol-witness-patrol.formula.toml",
+		"mol-deacon-patrol.formula.toml",
+		"mol-refinery-patrol.formula.toml",
+	}
+
+	for _, name := range patrolFormulas {
+		t.Run(name, func(t *testing.T) {
+			content, err := formulasFS.ReadFile("formulas/" + name)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+
+			f, err := Parse(content)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", name, err)
+			}
+
+			// Find the inbox-check step (first step in all patrol formulas)
+			var inboxDesc string
+			for _, step := range f.Steps {
+				if step.ID == "inbox-check" {
+					inboxDesc = step.Description
+					break
+				}
+			}
+			if inboxDesc == "" {
+				t.Fatalf("%s: inbox-check step not found or has empty description", name)
+			}
+
+			if !strings.Contains(inboxDesc, "bd mol wisp gc") {
+				t.Errorf("%s inbox-check step missing \"bd mol wisp gc\"\n"+
+					"All patrol formulas must run wisp GC at the start of each cycle\n"+
+					"to clean up stale wisps from abnormal exits.\n"+
+					"See steveyegge/gastown#1712.",
+					name)
 			}
 		})
 	}

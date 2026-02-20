@@ -936,8 +936,11 @@ func resolveAgentConfigInternal(townRoot, rigPath string) *RuntimeConfig {
 
 	// Backwards compatibility: if Runtime is set directly, use it
 	if rigSettings != nil && rigSettings.Runtime != nil {
-		rc := rigSettings.Runtime
-		return fillRuntimeDefaults(rc)
+		rc := fillRuntimeDefaults(rigSettings.Runtime)
+		if rc.ResolvedAgent == "" {
+			rc.ResolvedAgent = inferAgentName(rc)
+		}
+		return rc
 	}
 
 	// Load town settings for agent lookup
@@ -962,7 +965,9 @@ func resolveAgentConfigInternal(townRoot, rigPath string) *RuntimeConfig {
 		agentName = "claude" // ultimate fallback
 	}
 
-	return lookupAgentConfig(agentName, townSettings, rigSettings)
+	rc := lookupAgentConfig(agentName, townSettings, rigSettings)
+	rc.ResolvedAgent = agentName
+	return rc
 }
 
 // ResolveAgentConfigWithOverride resolves the agent configuration for a rig, with an optional override.
@@ -986,8 +991,11 @@ func resolveAgentConfigWithOverrideInternal(townRoot, rigPath, agentOverride str
 
 	// Backwards compatibility: if Runtime is set directly, use it (but still report agentOverride if present)
 	if rigSettings != nil && rigSettings.Runtime != nil && agentOverride == "" {
-		rc := rigSettings.Runtime
-		return fillRuntimeDefaults(rc), "", nil
+		rc := fillRuntimeDefaults(rigSettings.Runtime)
+		if rc.ResolvedAgent == "" {
+			rc.ResolvedAgent = inferAgentName(rc)
+		}
+		return rc, "", nil
 	}
 
 	// Load town settings for agent lookup
@@ -1036,7 +1044,9 @@ func resolveAgentConfigWithOverrideInternal(townRoot, rigPath, agentOverride str
 	}
 
 	// Normal lookup path (no override)
-	return lookupAgentConfig(agentName, townSettings, rigSettings), agentName, nil
+	rc := lookupAgentConfig(agentName, townSettings, rigSettings)
+	rc.ResolvedAgent = agentName
+	return rc, agentName, nil
 }
 
 // ValidateAgentConfig checks if an agent configuration is valid and the binary exists.
@@ -1165,6 +1175,76 @@ func RoleSettingsDir(role, rigPath string) string {
 	}
 }
 
+// tryResolveFromEphemeralTier checks the GT_COST_TIER environment variable
+// and returns the appropriate RuntimeConfig for the given role if an ephemeral
+// cost tier is set.
+//
+// Returns:
+//   - (rc, true)  — tier is active and has spoken for this role. rc may be nil
+//     if the tier says "use default" (empty agent mapping).
+//   - (nil, false) — no ephemeral tier active, or role is not tier-managed.
+//
+// The caller must respect handled=true even when rc is nil: it means the tier
+// explicitly wants the default agent for this role, and persisted RoleAgents
+// should be skipped to prevent stale config from leaking through.
+func tryResolveFromEphemeralTier(role string) (*RuntimeConfig, bool) {
+	tierName := os.Getenv("GT_COST_TIER")
+	if tierName == "" || !IsValidTier(tierName) {
+		return nil, false
+	}
+
+	tier := CostTier(tierName)
+	roleAgents := CostTierRoleAgents(tier)
+	if roleAgents == nil {
+		return nil, false
+	}
+
+	agentName, ok := roleAgents[role]
+	if !ok {
+		return nil, false // Role not managed by tiers
+	}
+
+	// Empty agent name means "use default (opus)" — signal handled but no override
+	if agentName == "" {
+		return nil, true
+	}
+
+	// Look up the agent config from the tier's agent definitions
+	agents := CostTierAgents(tier)
+	if agents != nil {
+		if rc, found := agents[agentName]; found && rc != nil {
+			filled := fillRuntimeDefaults(rc)
+			filled.ResolvedAgent = agentName
+			return filled, true
+		}
+	}
+
+	return nil, false
+}
+
+// hasExplicitNonClaudeOverride checks if a role has an explicit non-Claude agent
+// assignment in rig or town RoleAgents. This is used to prevent ephemeral cost
+// tiers from silently replacing intentional non-Claude agent selections.
+func hasExplicitNonClaudeOverride(role string, townSettings *TownSettings, rigSettings *RigSettings) bool {
+	// Check rig's RoleAgents
+	if rigSettings != nil && rigSettings.RoleAgents != nil {
+		if agentName, ok := rigSettings.RoleAgents[role]; ok && agentName != "" {
+			if rc := lookupAgentConfigIfExists(agentName, townSettings, rigSettings); rc != nil && !isClaudeAgent(rc) {
+				return true
+			}
+		}
+	}
+	// Check town's RoleAgents
+	if townSettings != nil && townSettings.RoleAgents != nil {
+		if agentName, ok := townSettings.RoleAgents[role]; ok && agentName != "" {
+			if rc := lookupAgentConfigIfExists(agentName, townSettings, rigSettings); rc != nil && !isClaudeAgent(rc) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings (may be nil for town-level roles like mayor/deacon)
 	var rigSettings *RigSettings
@@ -1188,16 +1268,45 @@ func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 		_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
 	}
 
+	// Check ephemeral cost tier (GT_COST_TIER env var)
+	tierRC, tierHandled := tryResolveFromEphemeralTier(role)
+	if tierHandled {
+		if tierRC != nil {
+			// Tier wants a specific Claude model for this role.
+			// But if there's an explicit non-Claude rig/town override, respect it —
+			// cost tiers only manage Claude model selection, not agent platform choice.
+			if hasExplicitNonClaudeOverride(role, townSettings, rigSettings) {
+				// Fall through to normal resolution below
+			} else {
+				return tierRC
+			}
+		} else {
+			// Tier says "use default" for this role — but if there's an explicit
+			// non-Claude override, respect it (cost tiers only manage Claude models).
+			if hasExplicitNonClaudeOverride(role, townSettings, rigSettings) {
+				// Fall through to normal resolution below
+			} else {
+				// Skip persisted RoleAgents to prevent stale config from leaking
+				// through, go straight to default resolution
+				// (rig's Agent → town's DefaultAgent → "claude").
+				return resolveAgentConfigInternal(townRoot, rigPath)
+			}
+		}
+	}
+
 	// Check rig's RoleAgents first
 	if rigSettings != nil && rigSettings.RoleAgents != nil {
 		if agentName, ok := rigSettings.RoleAgents[role]; ok && agentName != "" {
 			if rc := lookupCustomAgentConfig(agentName, townSettings, rigSettings); rc != nil {
+				rc.ResolvedAgent = agentName
 				return rc
 			}
 			if err := ValidateAgentConfig(agentName, townSettings, rigSettings); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: role_agents[%s]=%s - %v, falling back to default\n", role, agentName, err)
 			} else {
-				return lookupAgentConfig(agentName, townSettings, rigSettings)
+				rc := lookupAgentConfig(agentName, townSettings, rigSettings)
+				rc.ResolvedAgent = agentName
+				return rc
 			}
 		}
 	}
@@ -1206,12 +1315,15 @@ func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 	if townSettings.RoleAgents != nil {
 		if agentName, ok := townSettings.RoleAgents[role]; ok && agentName != "" {
 			if rc := lookupCustomAgentConfig(agentName, townSettings, rigSettings); rc != nil {
+				rc.ResolvedAgent = agentName
 				return rc
 			}
 			if err := ValidateAgentConfig(agentName, townSettings, rigSettings); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: role_agents[%s]=%s - %v, falling back to default\n", role, agentName, err)
 			} else {
-				return lookupAgentConfig(agentName, townSettings, rigSettings)
+				rc := lookupAgentConfig(agentName, townSettings, rigSettings)
+				rc.ResolvedAgent = agentName
+				return rc
 			}
 		}
 	}
@@ -1224,6 +1336,10 @@ func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 // ResolveRoleAgentName returns the agent name that would be used for a specific role.
 // This is useful for logging and diagnostics.
 // Returns the agent name and whether it came from role-specific configuration.
+//
+// NOTE: This function does not account for ephemeral cost tier overrides
+// (GT_COST_TIER env var). It reflects persisted config only. For the actual
+// runtime agent config, use ResolveRoleAgentConfig.
 func ResolveRoleAgentName(role, townRoot, rigPath string) (agentName string, isRoleSpecific bool) {
 	// Load rig settings
 	var rigSettings *RigSettings
@@ -1331,6 +1447,7 @@ func fillRuntimeDefaults(rc *RuntimeConfig) *RuntimeConfig {
 		Command:       rc.Command,
 		InitialPrompt: rc.InitialPrompt,
 		PromptMode:    rc.PromptMode,
+		ResolvedAgent: rc.ResolvedAgent,
 	}
 
 	// Deep copy Args slice to avoid sharing backing array
@@ -1409,6 +1526,19 @@ func fillRuntimeDefaults(rc *RuntimeConfig) *RuntimeConfig {
 		}
 	}
 
+	// Auto-fill Tmux defaults for pi (process detection).
+	if result.Command == "pi" {
+		if result.Tmux == nil {
+			result.Tmux = &RuntimeTmuxConfig{
+				ProcessNames: []string{"pi", "node", "bun"},
+				ReadyDelayMs: 3000,
+			}
+		}
+		if result.PromptMode == "" {
+			result.PromptMode = "arg"
+		}
+	}
+
 	// Auto-fill Env defaults from preset.
 	if preset != nil && len(preset.Env) > 0 {
 		if result.Env == nil {
@@ -1422,6 +1552,19 @@ func fillRuntimeDefaults(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	return result
+}
+
+// inferAgentName determines the agent name from a legacy RuntimeConfig.
+// It mirrors the preset resolution logic in fillRuntimeDefaults:
+// use Provider if set, otherwise Command, falling back to "claude".
+func inferAgentName(rc *RuntimeConfig) string {
+	if rc.Provider != "" {
+		return rc.Provider
+	}
+	if rc.Command != "" {
+		return rc.Command
+	}
+	return "claude"
 }
 
 // GetRuntimeCommand is a convenience function that returns the full command string
@@ -1621,6 +1764,13 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
+	// Set GT_AGENT from resolved agent name so IsAgentAlive can detect
+	// non-Claude processes (e.g., opencode). Without this, witness patrol
+	// falls back to ["node", "claude"] process detection and auto-nukes
+	// polecats running non-Claude agents. See: gt-agent-role-agents.
+	if rc.ResolvedAgent != "" {
+		resolvedEnv["GT_AGENT"] = rc.ResolvedAgent
+	}
 	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode)
 	for k, v := range rc.Env {
 		resolvedEnv[k] = v
@@ -1678,6 +1828,16 @@ func SanitizeAgentEnv(resolvedEnv, callerEnv map[string]string) {
 		if _, ok := resolvedEnv["NODE_OPTIONS"]; !ok {
 			resolvedEnv["NODE_OPTIONS"] = ""
 		}
+	}
+
+	// CLAUDECODE is set by Claude Code v2.x on startup and triggers nested session
+	// detection. When gt sling is invoked from within a Claude Code session, tmux
+	// inherits this variable into its global environment, causing new polecat sessions
+	// to fail with "Nested sessions share runtime resources and will crash all active
+	// sessions." Clear it unless the caller explicitly provides it.
+	// See: https://github.com/steveyegge/gastown/issues/1666
+	if _, ok := callerEnv["CLAUDECODE"]; !ok {
+		resolvedEnv["CLAUDECODE"] = ""
 	}
 }
 
@@ -1775,9 +1935,12 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
-	// Record agent override so handoff can preserve it
+	// Record agent name so IsAgentAlive can detect the running process.
+	// Explicit override takes priority; fall back to resolved agent name.
 	if agentOverride != "" {
 		resolvedEnv["GT_AGENT"] = agentOverride
+	} else if rc.ResolvedAgent != "" {
+		resolvedEnv["GT_AGENT"] = rc.ResolvedAgent
 	}
 	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode)
 	for k, v := range rc.Env {
@@ -1946,6 +2109,25 @@ func GetRigPrefix(townRoot, rigName string) string {
 	// Strip trailing hyphen if present (prefix stored as "gt-" but used as "gt")
 	prefix := entry.BeadsConfig.Prefix
 	return strings.TrimSuffix(prefix, "-")
+}
+
+// AllRigPrefixes returns a sorted list of all rig beads prefixes from rigs.json.
+// Trailing hyphens are stripped (e.g. "gt-" becomes "gt").
+// Returns nil on error (caller should handle the fallback).
+func AllRigPrefixes(townRoot string) []string {
+	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := LoadRigsConfig(rigsConfigPath)
+	if err != nil {
+		return nil
+	}
+	var prefixes []string
+	for _, entry := range rigsConfig.Rigs {
+		if entry.BeadsConfig != nil && entry.BeadsConfig.Prefix != "" {
+			prefixes = append(prefixes, strings.TrimSuffix(entry.BeadsConfig.Prefix, "-"))
+		}
+	}
+	sort.Strings(prefixes)
+	return prefixes
 }
 
 // EscalationConfigPath returns the standard path for escalation config in a town.

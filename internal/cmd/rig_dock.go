@@ -99,10 +99,12 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
 	bd := beads.New(r.BeadsPath())
 
-	// Check if rig bead exists, create if not
+	// Check if rig bead exists, create if not.
+	// Use create-then-show fallback to handle races and Dolt query hiccups
+	// that can cause Show to fail even when the bead exists (gt-d8681).
 	rigBead, err := bd.Show(rigBeadID)
 	if err != nil {
-		// Rig identity bead doesn't exist (legacy rig) - create it
+		// Rig identity bead not found (legacy rig) — try to create it
 		fmt.Printf("  Creating rig identity bead %s...\n", rigBeadID)
 		rigBead, err = bd.CreateRigBead(rigName, &beads.RigFields{
 			Repo:   r.GitURL,
@@ -110,7 +112,14 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 			State:  beads.RigStateActive,
 		})
 		if err != nil {
-			return fmt.Errorf("creating rig identity bead: %w", err)
+			// Create failed — may be a duplicate key if another process
+			// created it concurrently. Try Show once more.
+			var showErr error
+			rigBead, showErr = bd.Show(rigBeadID)
+			if showErr != nil || rigBead == nil {
+				return fmt.Errorf("creating rig identity bead: %w", err)
+			}
+			// Bead exists — fall through and use it
 		}
 	}
 

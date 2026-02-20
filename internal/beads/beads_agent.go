@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/gofrs/flock"
+
+	"github.com/steveyegge/gastown/internal/style"
 )
 
 // lockAgentBead acquires an exclusive file lock for a specific agent bead ID.
@@ -39,6 +41,7 @@ type AgentFields struct {
 	CleanupStatus     string // ZFC: polecat self-reports git state (clean, has_uncommitted, has_stash, has_unpushed)
 	ActiveMR          string // Currently active merge request bead ID (for traceability)
 	NotificationLevel string // DND mode: verbose, normal, muted (default: normal)
+	Mode              string // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
 	// Note: RoleBead field removed - role definitions are now config-based.
 	// See internal/config/roles/*.toml and config-based-roles.md.
 }
@@ -95,6 +98,10 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 		lines = append(lines, "notification_level: null")
 	}
 
+	if fields.Mode != "" {
+		lines = append(lines, fmt.Sprintf("mode: %s", fields.Mode))
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -136,6 +143,8 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.ActiveMR = value
 		case "notification_level":
 			fields.NotificationLevel = value
+		case "mode":
+			fields.Mode = value
 		}
 	}
 
@@ -152,6 +161,11 @@ func ParseAgentFields(description string) *AgentFields {
 // where the bead may be routed to a different database than the one this wrapper
 // is connected to.
 func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, error) {
+	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
+	if IsFlagLikeTitle(title) {
+		return nil, fmt.Errorf("refusing to create agent bead: %w (got %q)", ErrFlagTitle, title)
+	}
+
 	// Resolve where this bead will actually be written (handles multi-repo routing)
 	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
 
@@ -203,7 +217,7 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 		}
 		if err := target.SetHookBead(id, fields.HookBead); err != nil {
 			// Non-fatal: warn but continue - description text has the backup
-			fmt.Printf("Warning: could not set hook slot: %v\n", err)
+			style.PrintWarning("could not set hook slot: %v", err)
 		}
 	}
 
@@ -222,8 +236,8 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 // 4. Updates the bead with new fields regardless of prior state
 //
 // This is robust against Dolt backend issues where bd close/reopen may fail:
-// - If nuke used ResetAgentBeadForReuse (preferred), bead is open → update directly
-// - If nuke used CloseAndClearAgentBead (legacy), bead is closed → reopen then update
+// - If nuke used ResetAgentBeadForReuse, bead is open → update directly
+// - If bead is closed (legacy state), reopen then update
 // - If bead is in unknown state, falls back to show+update
 func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (*Issue, error) {
 	// First try to create the bead (no lock needed - create is atomic)
@@ -299,7 +313,7 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 	if fields != nil && fields.HookBead != "" {
 		if err := target.SetHookBead(id, fields.HookBead); err != nil {
 			// Non-fatal: warn but continue - description text has the backup
-			fmt.Printf("Warning: could not set hook slot: %v\n", err)
+			style.PrintWarning("could not set hook slot: %v", err)
 		}
 	}
 
@@ -313,7 +327,7 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 // bd reopen failures). By keeping the bead open with agent_state="nuked",
 // CreateOrReopenAgentBead can simply update it on re-spawn without needing reopen.
 //
-// This replaces CloseAndClearAgentBead for the nuke path (gt-14b8o).
+// This is the standard nuke path (gt-14b8o).
 func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 	// Lock the agent bead to prevent concurrent read-modify-write races.
 	// Without this, a concurrent CreateOrReopenAgentBead could overwrite
@@ -450,6 +464,7 @@ type AgentFieldUpdates struct {
 	CleanupStatus     *string
 	ActiveMR          *string
 	NotificationLevel *string
+	Mode              *string
 }
 
 // UpdateAgentDescriptionFields atomically updates one or more agent description
@@ -489,6 +504,9 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	}
 	if updates.NotificationLevel != nil {
 		fields.NotificationLevel = *updates.NotificationLevel
+	}
+	if updates.Mode != nil {
+		fields.Mode = *updates.Mode
 	}
 
 	description := FormatAgentDescription(issue.Title, fields)
@@ -530,90 +548,6 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 		return NotifyNormal, nil
 	}
 	return fields.NotificationLevel, nil
-}
-
-// DeleteAgentBead permanently deletes an agent bead.
-// Uses --hard --force for immediate permanent deletion (no tombstone).
-//
-// Deprecated: Agent beads represent persistent identity and should never be
-// hard-deleted. Use ResetAgentBeadForReuse instead, which preserves the CV
-// chain across assignments. This function remains only for test cleanup.
-//
-// WARNING: Due to a bd bug, --hard --force still creates tombstones instead of
-// truly deleting. This breaks CreateOrReopenAgentBead because tombstones are
-// invisible to bd show/reopen but still block bd create via UNIQUE constraint.
-func (b *Beads) DeleteAgentBead(id string) error {
-	_, err := b.run("delete", id, "--hard", "--force")
-	return err
-}
-
-// CloseAndClearAgentBead closes an agent bead (soft delete).
-//
-// Deprecated: Use ResetAgentBeadForReuse instead. Agent beads represent persistent
-// identity (not lifecycle artifacts) and should not be closed during nuke cycles.
-// Closing destroys work history continuity. ResetAgentBeadForReuse keeps the bead
-// open with agent_state="nuked", preserving the CV chain across assignments.
-//
-// This function remains for backward compatibility with older cleanup paths.
-// CreateOrReopenAgentBead can reopen closed beads when re-spawning polecats,
-// but the preferred path avoids close/reopen entirely.
-func (b *Beads) CloseAndClearAgentBead(id, reason string) error {
-	// Lock the agent bead to prevent concurrent read-modify-write races.
-	// See gt-joazs.
-	fl, lockErr := b.lockAgentBead(id)
-	if lockErr != nil {
-		return fmt.Errorf("locking agent bead %s: %w", id, lockErr)
-	}
-	defer func() { _ = fl.Unlock() }()
-
-	// Resolve where this bead lives (handles cross-rig routing).
-	// Without this, cross-rig agent beads (e.g., bd-beads-polecat-obsidian
-	// from gastown) would be looked up in the local rig's database and fail.
-	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
-	target := b
-	if targetDir != b.getResolvedBeadsDir() {
-		target = NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
-	}
-
-	// Clear mutable fields to emulate delete --force --hard behavior.
-	// This ensures reopened agent beads don't have stale state.
-
-	// First get current issue to preserve immutable fields
-	issue, err := target.Show(id)
-	if err != nil {
-		// If we can't read the issue, still attempt to close
-		args := []string{"close", id}
-		if reason != "" {
-			args = append(args, "--reason="+reason)
-		}
-		_, closeErr := target.run(args...)
-		return closeErr
-	}
-
-	// Parse existing fields and clear mutable ones
-	fields := ParseAgentFields(issue.Description)
-	fields.HookBead = ""     // Clear hook_bead
-	fields.ActiveMR = ""     // Clear active_mr
-	fields.CleanupStatus = "" // Clear cleanup_status
-	fields.AgentState = "closed"
-
-	// Update description with cleared fields
-	description := FormatAgentDescription(issue.Title, fields)
-	if err := target.Update(id, UpdateOptions{Description: &description}); err != nil {
-		// Non-fatal: continue with close even if update fails
-	}
-
-	// Also clear the hook slot in the database
-	if err := target.ClearHookBead(id); err != nil {
-		// Non-fatal
-	}
-
-	args := []string{"close", id}
-	if reason != "" {
-		args = append(args, "--reason="+reason)
-	}
-	_, err = target.run(args...)
-	return err
 }
 
 // GetAgentBead retrieves an agent bead by ID.

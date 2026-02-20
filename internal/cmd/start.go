@@ -43,6 +43,7 @@ var (
 	startCrewRig                string
 	startCrewAccount            string
 	startCrewAgentOverride      string
+	startCostTier               string
 	shutdownGraceful            bool
 	shutdownWait                int
 	shutdownAll                 bool
@@ -133,6 +134,7 @@ func init() {
 	startCmd.Flags().BoolVarP(&startAll, "all", "a", false,
 		"Also start Witnesses and Refineries for all rigs")
 	startCmd.Flags().StringVar(&startAgentOverride, "agent", "", "Agent alias to run Mayor/Deacon with (overrides town default)")
+	startCmd.Flags().StringVar(&startCostTier, "cost-tier", "", "Ephemeral cost tier for this session (standard/economy/budget)")
 
 	startCrewCmd.Flags().StringVar(&startCrewRig, "rig", "", "Rig to use")
 	startCrewCmd.Flags().StringVar(&startCrewAccount, "account", "", "Claude Code account handle to use")
@@ -180,6 +182,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	// Apply ephemeral cost tier if specified
+	if startCostTier != "" {
+		if !config.IsValidTier(startCostTier) {
+			return fmt.Errorf("invalid cost tier %q (valid: %s)", startCostTier, strings.Join(config.ValidCostTiers(), ", "))
+		}
+		os.Setenv("GT_COST_TIER", startCostTier)
+		fmt.Printf("Using ephemeral cost tier: %s\n", style.Bold.Render(startCostTier))
+	}
+
 	if err := config.EnsureDaemonPatrolConfig(townRoot); err != nil {
 		fmt.Printf("  %s Could not ensure daemon config: %v\n", style.Dim.Render("○"), err)
 	}
@@ -189,7 +200,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Clean up orphaned tmux sessions before starting new agents.
 	// This prevents session name conflicts and resource accumulation from
 	// zombie sessions (tmux alive but Claude dead).
-	if cleaned, err := t.CleanupOrphanedSessions(); err != nil {
+	if cleaned, err := t.CleanupOrphanedSessions(session.IsKnownSession); err != nil {
 		fmt.Printf("  %s Could not clean orphaned sessions: %v\n", style.Dim.Render("○"), err)
 	} else if cleaned > 0 {
 		fmt.Printf("  %s Cleaned up %d orphaned session(s)\n", style.Bold.Render("✓"), cleaned)
@@ -454,7 +465,7 @@ func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot strin
 		if !t.IsAgentAlive(sessionID) {
 			// Agent has exited, restart it
 			// Build startup beacon for predecessor discovery via /resume
-			address := fmt.Sprintf("%s/crew/%s", r.Name, crewName)
+			address := session.BeaconRecipient("crew", crewName, r.Name)
 			beacon := session.FormatStartupBeacon(session.BeaconConfig{
 				Recipient: address,
 				Sender:    "human",

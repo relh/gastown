@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -756,12 +757,51 @@ func outputMoleculeStatus(status MoleculeStatusInfo) error {
 		}
 	}
 
+	// Git divergence warning (gt-7w6cq)
+	showGitDivergenceWarning()
+
 	// Next action hint
 	if status.NextAction != "" {
 		fmt.Printf("\n%s %s\n", style.Bold.Render("Next:"), status.NextAction)
 	}
 
 	return nil
+}
+
+// showGitDivergenceWarning checks if the current branch has diverged from its
+// remote tracking branch and shows a warning. Uses local refs only (no fetch)
+// so it's fast but may be stale.
+func showGitDivergenceWarning() {
+	g := git.NewGit(".")
+	branch, err := g.CurrentBranch()
+	if err != nil || branch == "" {
+		return
+	}
+
+	remote := "origin/" + branch
+	ahead, aErr := g.CommitsAhead(remote, "HEAD")
+	behind, bErr := g.CountCommitsBehind(remote)
+	if aErr != nil || bErr != nil {
+		return // No tracking branch or other error — skip silently
+	}
+
+	if ahead == 0 && behind == 0 {
+		return // In sync
+	}
+
+	fmt.Println()
+	if ahead > 0 && behind > 0 {
+		fmt.Printf("%s Branch diverged: %d ahead, %d behind %s\n",
+			style.Warning.Render("⚠"), ahead, behind, remote)
+		fmt.Printf("  Run 'git pull --rebase' before starting work\n")
+	} else if behind > 0 {
+		fmt.Printf("%s Branch is %d commits behind %s\n",
+			style.Warning.Render("⚠"), behind, remote)
+		fmt.Printf("  Run 'git pull' to update\n")
+	} else {
+		fmt.Printf("%s Branch is %d commits ahead of %s (unpushed work)\n",
+			style.Dim.Render("ℹ"), ahead, remote)
+	}
 }
 
 func runMoleculeCurrent(cmd *cobra.Command, args []string) error {

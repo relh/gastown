@@ -12,6 +12,7 @@ type Role string
 const (
 	RoleMayor    Role = "mayor"
 	RoleDeacon   Role = "deacon"
+	RoleOverseer Role = "overseer"
 	RoleWitness  Role = "witness"
 	RoleRefinery Role = "refinery"
 	RoleCrew     Role = "crew"
@@ -117,7 +118,7 @@ func ParseSessionNameWithRegistry(session string, registry *PrefixRegistry) (*Ag
 		case "boot":
 			return &AgentIdentity{Role: RoleDeacon, Name: "boot"}, nil
 		case "overseer":
-			return &AgentIdentity{Role: RolePolecat, Name: "overseer"}, nil
+			return &AgentIdentity{Role: RoleOverseer}, nil
 		default:
 			return nil, fmt.Errorf("invalid session name %q: unknown hq- role", session)
 		}
@@ -169,6 +170,8 @@ func (a *AgentIdentity) SessionName() string {
 			return BootSessionName()
 		}
 		return DeaconSessionName()
+	case RoleOverseer:
+		return OverseerSessionName()
 	case RoleWitness:
 		return WitnessSessionName(a.prefix())
 	case RoleRefinery:
@@ -193,6 +196,36 @@ func (a *AgentIdentity) prefix() string {
 	return DefaultPrefix
 }
 
+// BeaconAddress returns a human-readable, non-path-like address for use in
+// startup beacons. Unlike Address(), this format prevents LLMs from
+// misinterpreting the recipient as a filesystem path.
+// Examples:
+//   - mayor → "mayor"
+//   - deacon → "deacon"
+//   - witness → "witness (rig: gastown)"
+//   - crew → "crew max (rig: gastown)"
+//   - polecat → "polecat Toast (rig: gastown)"
+func (a *AgentIdentity) BeaconAddress() string {
+	switch a.Role {
+	case RoleMayor:
+		return "mayor"
+	case RoleDeacon:
+		return "deacon"
+	case RoleOverseer:
+		return "overseer"
+	case RoleWitness:
+		return BeaconRecipient("witness", "", a.Rig)
+	case RoleRefinery:
+		return BeaconRecipient("refinery", "", a.Rig)
+	case RoleCrew:
+		return BeaconRecipient("crew", a.Name, a.Rig)
+	case RolePolecat:
+		return BeaconRecipient("polecat", a.Name, a.Rig)
+	default:
+		return ""
+	}
+}
+
 // Address returns the mail-style address for this identity.
 // Examples:
 //   - mayor → "mayor"
@@ -207,6 +240,8 @@ func (a *AgentIdentity) Address() string {
 		return "mayor"
 	case RoleDeacon:
 		return "deacon"
+	case RoleOverseer:
+		return "overseer"
 	case RoleWitness:
 		return fmt.Sprintf("%s/witness", a.Rig)
 	case RoleRefinery:

@@ -456,7 +456,16 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		//   direct: push commits straight to target branch, bypass refinery
 		//   mr:     default — create merge-request bead, refinery merges
 		//   local:  keep on feature branch, no push, no MR (for human review/upstream PRs)
-		convoyInfo = getConvoyInfoForIssue(issueID)
+		//
+		// Primary: read convoy info from the issue's attachment fields (gt-7b6wf fix).
+		// gt sling stores convoy_id and merge_strategy on the issue when dispatching,
+		// which avoids unreliable cross-rig dep resolution at gt done time.
+		// Fallback: dep-based lookup via getConvoyInfoForIssue (for issues dispatched
+		// before this fix, or where attachment fields weren't set).
+		convoyInfo = getConvoyInfoFromIssue(issueID, cwd)
+		if convoyInfo == nil {
+			convoyInfo = getConvoyInfoForIssue(issueID)
+		}
 
 		// Handle "local" strategy: skip push and MR entirely
 		if convoyInfo != nil && convoyInfo.MergeStrategy == "local" {
@@ -647,7 +656,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Check if issue belongs to an owned+direct convoy.
 		// Owned convoys with direct merge strategy bypass the refinery pipeline —
 		// the polecat already pushed to main. Skip MR creation and close directly.
-		convoyInfo = getConvoyInfoForIssue(issueID)
+		convoyInfo = getConvoyInfoFromIssue(issueID, cwd)
+		if convoyInfo == nil {
+			convoyInfo = getConvoyInfoForIssue(issueID)
+		}
 		if convoyInfo.IsOwnedDirect() {
 			fmt.Printf("%s Owned convoy (direct merge): skipping merge queue\n", style.Bold.Render("→"))
 			fmt.Printf("  Convoy: %s\n", convoyInfo.ID)
@@ -929,6 +941,11 @@ afterDoltMerge:
 				style.PrintWarning("worktree nuke failed: %v (Witness will clean up)", err)
 			} else {
 				fmt.Printf("%s Worktree nuked\n", style.Bold.Render("✓"))
+				// Restore a valid cwd after worktree deletion. Without this,
+				// subsequent exec.Command calls (tmux, kill) fail with
+				// "ENOENT: posix_spawn '/bin/sh'" because the child process
+				// inherits the deleted cwd.
+				_ = os.Chdir("/")
 			}
 		}
 

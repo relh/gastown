@@ -41,12 +41,14 @@ Town root protection:
 
 Infrastructure checks:
   - stale-binary             Check if gt binary is up to date with repo
+  - beads-binary             Check that beads (bd) is installed and meets minimum version
   - daemon                   Check if daemon is running (fixable)
   - boot-health              Check Boot watchdog health (vet mode)
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
   - orphan-processes         Detect orphaned Claude processes
+  - session-name-format      Detect sessions with outdated naming format (fixable)
   - wisp-gc                  Detect and clean abandoned wisps (>1h)
   - stale-beads-redirect     Detect stale files in .beads directories with redirects
 
@@ -82,6 +84,7 @@ Session hook checks:
   - session-hooks            Check settings.json use session-start.sh
   - claude-settings          Check Claude settings.json match templates (fixable)
   - deprecated-merge-queue-keys  Detect stale deprecated keys in merge_queue config (fixable)
+  - stale-task-dispatch      Detect stale task-dispatch guard in settings.json (fixable)
 
 Dolt checks:
   - dolt-binary              Check that dolt is installed and in PATH
@@ -137,6 +140,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// Register built-in checks
 	d.Register(doctor.NewStaleBinaryCheck())
+	d.Register(doctor.NewBeadsBinaryCheck())
 	// All database queries go through bd CLI
 	d.Register(doctor.NewTownGitCheck())
 	d.Register(doctor.NewTownRootBranchCheck())
@@ -153,6 +157,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewRoutesCheck())
 	d.Register(doctor.NewRigRoutesJSONLCheck())
 	d.Register(doctor.NewRoutingModeCheck())
+	d.Register(doctor.NewMalformedSessionNameCheck())
 	d.Register(doctor.NewOrphanSessionCheck())
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
@@ -210,6 +215,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewOrphanedAttachmentsCheck())
 
 	// Hooks sync check
+	d.Register(doctor.NewStaleTaskDispatchCheck())
 	d.Register(doctor.NewHooksSyncCheck())
 
 	// Dolt health checks
