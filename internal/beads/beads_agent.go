@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gofrs/flock"
@@ -42,6 +43,9 @@ type AgentFields struct {
 	ActiveMR          string // Currently active merge request bead ID (for traceability)
 	NotificationLevel string // DND mode: verbose, normal, muted (default: normal)
 	Mode              string // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
+	// Circuit breaker fields for agent failure isolation
+	FailureCount int    // Consecutive failure count
+	CircuitState string // closed (normal), open (tripped), half_open (testing recovery)
 	// Note: RoleBead field removed - role definitions are now config-based.
 	// See internal/config/roles/*.toml and config-based-roles.md.
 }
@@ -52,6 +56,16 @@ const (
 	NotifyNormal  = "normal"  // Important events only (default)
 	NotifyMuted   = "muted"   // Silent/DND mode - batch for later
 )
+
+// Circuit breaker state constants
+const (
+	CircuitClosed   = "closed"    // Normal operation - agent accepts work
+	CircuitOpen     = "open"      // Tripped - agent is failing, reject new work
+	CircuitHalfOpen = "half_open" // Testing recovery - allow single retry
+)
+
+// DefaultMaxFailures is the number of consecutive failures before tripping the circuit.
+const DefaultMaxFailures = 3
 
 // FormatAgentDescription creates a description string from agent fields.
 func FormatAgentDescription(title string, fields *AgentFields) string {
@@ -102,6 +116,14 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 		lines = append(lines, fmt.Sprintf("mode: %s", fields.Mode))
 	}
 
+	// Circuit breaker fields
+	lines = append(lines, fmt.Sprintf("failure_count: %d", fields.FailureCount))
+	if fields.CircuitState != "" {
+		lines = append(lines, fmt.Sprintf("circuit_state: %s", fields.CircuitState))
+	} else {
+		lines = append(lines, "circuit_state: closed")
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -145,6 +167,12 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.NotificationLevel = value
 		case "mode":
 			fields.Mode = value
+		case "failure_count":
+			if count, err := strconv.Atoi(value); err == nil {
+				fields.FailureCount = count
+			}
+		case "circuit_state":
+			fields.CircuitState = value
 		}
 	}
 
@@ -465,6 +493,9 @@ type AgentFieldUpdates struct {
 	ActiveMR          *string
 	NotificationLevel *string
 	Mode              *string
+	// Circuit breaker fields
+	FailureCount *int
+	CircuitState *string
 }
 
 // UpdateAgentDescriptionFields atomically updates one or more agent description
@@ -507,6 +538,12 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	}
 	if updates.Mode != nil {
 		fields.Mode = *updates.Mode
+	}
+	if updates.FailureCount != nil {
+		fields.FailureCount = *updates.FailureCount
+	}
+	if updates.CircuitState != nil {
+		fields.CircuitState = *updates.CircuitState
 	}
 
 	description := FormatAgentDescription(issue.Title, fields)
@@ -588,4 +625,120 @@ func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	}
 
 	return result, nil
+}
+
+// Circuit Breaker Methods
+// These implement the circuit breaker pattern for agent failure isolation.
+// See: https://github.com/steveyegge/gastown/issues/gs-33zi
+
+// IncrementAgentFailureCount increments the failure count for an agent.
+// Returns the new failure count and whether the circuit should be tripped.
+// If the circuit is already open, this is a no-op and returns the current state.
+func (b *Beads) IncrementAgentFailureCount(id string, maxFailures int) (newCount int, shouldTrip bool, err error) {
+	if maxFailures <= 0 {
+		maxFailures = DefaultMaxFailures
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return 0, false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, showErr := b.Show(id)
+	if showErr != nil {
+		return 0, false, showErr
+	}
+
+	fields := ParseAgentFields(issue.Description)
+
+	// If circuit is already open, don't increment further
+	if fields.CircuitState == CircuitOpen {
+		return fields.FailureCount, false, nil
+	}
+
+	fields.FailureCount++
+	newCount = fields.FailureCount
+	shouldTrip = newCount >= maxFailures
+
+	if shouldTrip {
+		fields.CircuitState = CircuitOpen
+	}
+
+	description := FormatAgentDescription(issue.Title, fields)
+	if updateErr := b.Update(id, UpdateOptions{Description: &description}); updateErr != nil {
+		return 0, false, updateErr
+	}
+
+	return newCount, shouldTrip, nil
+}
+
+// ResetAgentFailureCount resets the failure count to zero and closes the circuit.
+// Called when an agent completes work successfully.
+func (b *Beads) ResetAgentFailureCount(id string) error {
+	count := 0
+	state := CircuitClosed
+	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
+		FailureCount: &count,
+		CircuitState: &state,
+	})
+}
+
+// GetAgentCircuitState returns the current circuit state for an agent.
+// Returns CircuitClosed if the agent bead doesn't exist or has no circuit state set.
+func (b *Beads) GetAgentCircuitState(id string) (string, int, error) {
+	_, fields, err := b.GetAgentBead(id)
+	if err != nil {
+		return CircuitClosed, 0, err
+	}
+	if fields == nil {
+		return CircuitClosed, 0, nil
+	}
+	state := fields.CircuitState
+	if state == "" {
+		state = CircuitClosed
+	}
+	return state, fields.FailureCount, nil
+}
+
+// TripCircuitBreaker immediately trips the circuit for an agent.
+// Used when a failure is severe enough to warrant immediate circuit opening.
+func (b *Beads) TripCircuitBreaker(id string) error {
+	state := CircuitOpen
+	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
+		CircuitState: &state,
+	})
+}
+
+// SetCircuitHalfOpen sets the circuit to half-open state for recovery testing.
+// In half-open state, the agent is allowed one attempt to prove recovery.
+func (b *Beads) SetCircuitHalfOpen(id string) error {
+	state := CircuitHalfOpen
+	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
+		CircuitState: &state,
+	})
+}
+
+// CloseCircuit closes the circuit and resets the failure count.
+// Called after successful recovery from half-open state.
+func (b *Beads) CloseCircuit(id string) error {
+	return b.ResetAgentFailureCount(id)
+}
+
+// IsCircuitOpen returns true if the agent's circuit is open (tripped).
+func (b *Beads) IsCircuitOpen(id string) (bool, error) {
+	state, _, err := b.GetAgentCircuitState(id)
+	if err != nil {
+		return false, err
+	}
+	return state == CircuitOpen, nil
+}
+
+// IsCircuitHalfOpen returns true if the agent's circuit is in half-open state.
+func (b *Beads) IsCircuitHalfOpen(id string) (bool, error) {
+	state, _, err := b.GetAgentCircuitState(id)
+	if err != nil {
+		return false, err
+	}
+	return state == CircuitHalfOpen, nil
 }

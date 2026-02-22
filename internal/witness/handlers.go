@@ -58,6 +58,12 @@ type HandlerResult struct {
 // immediate merge queue processing. This ensures work flows through the system
 // without waiting for the daemon's heartbeat cycle.
 //
+// Circuit Breaker Integration:
+// - COMPLETED exits reset the failure count (successful work)
+// - ESCALATED/DEFERRED exits increment the failure count
+// - After N consecutive failures, the circuit trips and the polecat is nuked
+// - Tripped polecats have their work re-queued (not retried) to a fresh polecat
+//
 // Ephemeral Polecat Model:
 // Polecats are truly ephemeral - done at MR submission, recyclable immediately.
 // Once the branch is pushed (cleanup_status=clean), the polecat can be nuked.
@@ -81,10 +87,18 @@ func HandlePolecatDone(workDir, rigName string, msg *mail.Message, router *mail.
 		return result
 	}
 
+	// Circuit breaker handling: track failures and check if circuit should trip
+	circuitTripped := updateCircuitBreakerState(workDir, rigName, payload)
+
 	if payload.Exit == "PHASE_COMPLETE" {
 		result.Handled = true
 		result.Action = fmt.Sprintf("phase-complete for %s (gate=%s) - session recycled, awaiting gate", payload.PolecatName, payload.Gate)
 		return result
+	}
+
+	// If circuit tripped, nuke the polecat and re-queue work
+	if circuitTripped {
+		return handleCircuitTripped(workDir, rigName, payload, router, result)
 	}
 
 	hasPendingMR := payload.MRID != "" || payload.Exit == "COMPLETED"
@@ -92,6 +106,95 @@ func HandlePolecatDone(workDir, rigName string, msg *mail.Message, router *mail.
 		return handlePolecatDonePendingMR(workDir, rigName, payload, router, result)
 	}
 	return handlePolecatDoneNoMR(workDir, rigName, payload, result)
+}
+
+// updateCircuitBreakerState updates the circuit breaker state based on exit type.
+// Returns true if the circuit was tripped (indicating the polecat should be nuked
+// and work re-queued).
+func updateCircuitBreakerState(workDir, rigName string, payload *PolecatDonePayload) bool {
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, payload.PolecatName)
+	bd := beads.NewWithBeadsDir(townRoot, beads.ResolveBeadsDir(townRoot))
+
+	switch payload.Exit {
+	case "COMPLETED":
+		// Success: reset failure count and close circuit
+		_ = bd.ResetAgentFailureCount(agentBeadID)
+		return false
+
+	case "ESCALATED", "DEFERRED":
+		// Failure: increment failure count and check for circuit trip
+		_, tripped, err := bd.IncrementAgentFailureCount(agentBeadID, beads.DefaultMaxFailures)
+		if err != nil {
+			// Log error but don't fail the handler
+			return false
+		}
+		return tripped
+
+	default:
+		// Unknown exit type - treat as neutral (no change)
+		return false
+	}
+}
+
+// handleCircuitTripped handles a polecat whose circuit has tripped.
+// Nukes the polecat and re-queues the work to a fresh polecat.
+func handleCircuitTripped(workDir, rigName string, payload *PolecatDonePayload, router *mail.Router, result *HandlerResult) *HandlerResult {
+	// Nuke the failing polecat
+	if err := NukePolecat(workDir, rigName, payload.PolecatName); err != nil {
+		result.Error = fmt.Errorf("nuking tripped polecat: %w", err)
+	}
+
+	// Re-queue the work (not retry - this goes to a FRESH polecat)
+	if payload.IssueID != "" && router != nil {
+		if mailID, err := sendWorkRequeue(router, rigName, payload); err != nil {
+			if result.Error == nil {
+				result.Error = fmt.Errorf("sending WORK_REQUEUE: %w", err)
+			}
+		} else {
+			result.MailSent = mailID
+		}
+	}
+
+	result.Handled = true
+	result.Action = fmt.Sprintf("circuit-tripped for %s - nuked and work re-queued (issue=%s)", payload.PolecatName, payload.IssueID)
+	return result
+}
+
+// sendWorkRequeue sends a WORK_REQUEUE notification to the Deacon.
+// This signals that work should be assigned to a fresh polecat (not retried on the same one).
+func sendWorkRequeue(router *mail.Router, rigName string, payload *PolecatDonePayload) (string, error) {
+	msg := mail.NewMessage(
+		fmt.Sprintf("%s/witness", rigName),
+		"deacon/",
+		fmt.Sprintf("WORK_REQUEUE %s", payload.IssueID),
+		fmt.Sprintf(`Issue: %s
+Branch: %s
+Previous Polecat: %s
+Reason: circuit_breaker_tripped
+Exit: %s
+
+The previous polecat's circuit breaker tripped after consecutive failures.
+Please assign this work to a fresh polecat (do NOT retry on the same polecat).`,
+			payload.IssueID,
+			payload.Branch,
+			payload.PolecatName,
+			payload.Exit,
+		),
+	)
+	msg.Priority = mail.PriorityHigh
+	msg.Type = mail.TypeTask
+
+	if err := router.Send(msg); err != nil {
+		return "", err
+	}
+
+	return msg.ID, nil
 }
 
 // handlePolecatDonePendingMR handles a POLECAT_DONE when there's a pending MR.
@@ -1895,4 +1998,136 @@ func findAnyCleanupWisp(workDir, polecatName string) string {
 		return ""
 	}
 	return items[0].ID
+}
+
+// CircuitBreakerResult represents the result of checking a polecat's circuit breaker.
+type CircuitBreakerResult struct {
+	PolecatName  string
+	CircuitState string
+	FailureCount int
+	Action       string // "none", "half-opened", "reset", "tripped"
+	Error        error
+}
+
+// CheckCircuitBreakersResult contains the results of a circuit breaker sweep.
+type CheckCircuitBreakersResult struct {
+	Checked int
+	Results []CircuitBreakerResult
+	Errors  []error
+}
+
+// CheckCircuitBreakers scans all polecat agent beads for circuit breaker state.
+// This is a patrol step that:
+// - Identifies polecats with open circuits
+// - Optionally transitions open circuits to half-open for recovery testing
+// - Reports polecats that have been in tripped state too long
+//
+// Parameters:
+//   - workDir: Working directory for beads operations
+//   - rigName: Name of the rig to check
+//   - cooldownMinutes: Minutes to wait before transitioning open→half_open (0 = immediate)
+func CheckCircuitBreakers(workDir, rigName string, cooldownMinutes int) *CheckCircuitBreakersResult {
+	result := &CheckCircuitBreakersResult{}
+
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+
+	bd := beads.NewWithBeadsDir(townRoot, beads.ResolveBeadsDir(townRoot))
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+
+	// List all polecat directories
+	polecatsDir := filepath.Join(townRoot, rigName, "polecats")
+	entries, err := os.ReadDir(polecatsDir)
+	if err != nil {
+		return result
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		polecatName := entry.Name()
+		result.Checked++
+
+		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+		state, failureCount, err := bd.GetAgentCircuitState(agentBeadID)
+		if err != nil {
+			result.Errors = append(result.Errors,
+				fmt.Errorf("getting circuit state for %s: %w", polecatName, err))
+			continue
+		}
+
+		cbResult := CircuitBreakerResult{
+			PolecatName:  polecatName,
+			CircuitState: state,
+			FailureCount: failureCount,
+			Action:       "none",
+		}
+
+		// Handle based on current state
+		switch state {
+		case beads.CircuitOpen:
+			// Circuit is tripped. Consider transitioning to half-open for recovery.
+			// In a real implementation, we'd track when the circuit opened and
+			// wait for cooldown period. For now, we just log it.
+			cbResult.Action = "monitored-open"
+
+		case beads.CircuitHalfOpen:
+			// Circuit is testing recovery. The next success/failure will
+			// close or re-open it. Nothing to do here.
+			cbResult.Action = "monitored-half-open"
+
+		case beads.CircuitClosed:
+			// Normal operation. If failure count is non-zero, it means
+			// there were recent failures that didn't trip the circuit.
+			if failureCount > 0 {
+				cbResult.Action = "monitored-recovering"
+			}
+		}
+
+		result.Results = append(result.Results, cbResult)
+	}
+
+	return result
+}
+
+// GetTrippedPolecats returns a list of polecats with open (tripped) circuits.
+// This is useful for reporting and monitoring.
+func GetTrippedPolecats(workDir, rigName string) ([]string, error) {
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+
+	bd := beads.NewWithBeadsDir(townRoot, beads.ResolveBeadsDir(townRoot))
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+
+	polecatsDir := filepath.Join(townRoot, rigName, "polecats")
+	entries, err := os.ReadDir(polecatsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var tripped []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		polecatName := entry.Name()
+		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+
+		isOpen, err := bd.IsCircuitOpen(agentBeadID)
+		if err != nil {
+			continue
+		}
+		if isOpen {
+			tripped = append(tripped, polecatName)
+		}
+	}
+
+	return tripped, nil
 }

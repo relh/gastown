@@ -33,6 +33,9 @@ var (
 
 	// SWARM_START - mayor initiating batch work
 	PatternSwarmStart = regexp.MustCompile(`^SWARM_START`)
+
+	// WORK_REQUEUE - witness requesting work re-dispatch after circuit breaker trip
+	PatternWorkRequeue = regexp.MustCompile(`^WORK_REQUEUE\s+(\S+)`)
 )
 
 // ProtocolType identifies the type of protocol message.
@@ -47,6 +50,7 @@ const (
 	ProtoMergeReady        ProtocolType = "merge_ready"
 	ProtoHandoff           ProtocolType = "handoff"
 	ProtoSwarmStart        ProtocolType = "swarm_start"
+	ProtoWorkRequeue       ProtocolType = "work_requeue"
 	ProtoUnknown           ProtocolType = "unknown"
 )
 
@@ -106,6 +110,18 @@ type SwarmStartPayload struct {
 	StartedAt time.Time
 }
 
+// WorkRequeuePayload contains parsed data from a WORK_REQUEUE message.
+// This is sent when a polecat's circuit breaker trips and work needs to be
+// re-assigned to a fresh polecat (not retried on the same one).
+type WorkRequeuePayload struct {
+	IssueID         string
+	Branch          string
+	PreviousPolecat string
+	Reason          string
+	Exit            string
+	RequestedAt     time.Time
+}
+
 // ClassifyMessage determines the protocol type from a message subject.
 func ClassifyMessage(subject string) ProtocolType {
 	switch {
@@ -125,6 +141,8 @@ func ClassifyMessage(subject string) ProtocolType {
 		return ProtoHandoff
 	case PatternSwarmStart.MatchString(subject):
 		return ProtoSwarmStart
+	case PatternWorkRequeue.MatchString(subject):
+		return ProtoWorkRequeue
 	default:
 		return ProtoUnknown
 	}
@@ -422,4 +440,44 @@ func AssessHelpRequest(payload *HelpPayload) *HelpAssessment {
 	}
 
 	return assessment
+}
+
+// ParseWorkRequeue extracts payload from a WORK_REQUEUE message.
+// Subject format: WORK_REQUEUE <issue-id>
+// Body format:
+//
+//	Issue: <issue-id>
+//	Branch: <branch>
+//	Previous Polecat: <polecat-name>
+//	Reason: circuit_breaker_tripped
+//	Exit: <exit-type>
+func ParseWorkRequeue(subject, body string) (*WorkRequeuePayload, error) {
+	matches := PatternWorkRequeue.FindStringSubmatch(subject)
+	if len(matches) < 2 {
+		return nil, fmt.Errorf("invalid WORK_REQUEUE subject: %s", subject)
+	}
+
+	payload := &WorkRequeuePayload{
+		IssueID:     matches[1],
+		RequestedAt: time.Now(),
+	}
+
+	// Parse body for structured fields
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Issue:"):
+			payload.IssueID = strings.TrimSpace(strings.TrimPrefix(line, "Issue:"))
+		case strings.HasPrefix(line, "Branch:"):
+			payload.Branch = strings.TrimSpace(strings.TrimPrefix(line, "Branch:"))
+		case strings.HasPrefix(line, "Previous Polecat:"):
+			payload.PreviousPolecat = strings.TrimSpace(strings.TrimPrefix(line, "Previous Polecat:"))
+		case strings.HasPrefix(line, "Reason:"):
+			payload.Reason = strings.TrimSpace(strings.TrimPrefix(line, "Reason:"))
+		case strings.HasPrefix(line, "Exit:"):
+			payload.Exit = strings.TrimSpace(strings.TrimPrefix(line, "Exit:"))
+		}
+	}
+
+	return payload, nil
 }
